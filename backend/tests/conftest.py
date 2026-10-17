@@ -48,7 +48,7 @@ def accounts(migrate):
 def clients(accounts):
     instances = {}
     for name, info in accounts.items():
-        client = TestClient(app, headers={'X-Comgraf-Request':'1'})
+        client = TestClient(app, headers={'X-Comgraf-Request':'1', 'X-Comgraf-Contract':'2', 'X-Comgraf-Build':'1.1.0'})
         response = client.post('/api/auth/login', json={'username':name, 'password':info['password']})
         assert response.status_code == 200, response.text
         instances[name] = client

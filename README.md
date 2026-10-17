@@ -96,16 +96,26 @@ Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vit
 6. Registrar cantidades entregadas por partida y evidencia. Una entrega parcial conserva pendientes; solo las cantidades completas muestran Entregado y detienen el tiempo activo.
 7. Registrar anticipos/abonos; corregir mediante reversión o ajuste autorizado. La entrega permite, con permiso financiero, incluir un abono en la misma operación o liquidar el saldo mostrado; entregar nunca crea un pago. Los saldos siguen visibles con atención cerrada.
 
+Si se anula un trabajo, el usuario registra el motivo y elige **Sin cargo** o un **importe final acordado** (total definitivo del trabajo, no cargo adicional). El ajuste conserva obligación y pagos anteriores. Si el total pagado supera el importe final, queda saldo a favor; una devolución requiere que un usuario con permiso financiero confirme fecha/importe/referencia después de realizarla. Una persona que puede detener producción pero no ajustar cobros deja la resolución en la bandeja **Resolución de anulación**. Las órdenes históricas anuladas también requieren revisión explícita.
+
 Correo/WhatsApp muestran **No configurado**. Se guardan borradores y se registran interacciones manuales; no hay envíos simulados. Los borradores se guardan por caso/canal/usuario en MySQL; el navegador conserva un respaldo provisional durante la escritura. Los expedientes y saldos nunca dependen de localStorage.
 
 ## Actualización
 
-1. Crear respaldo consistente (SQL y archivos).
-2. Detener cambios del equipo y colocar la versión revisada del código.
-3. `docker compose build app` y `docker compose up -d app`. El arranque aplica Alembic antes de servir solicitudes.
-4. Comprobar `docker compose ps`, `/api/health`, login, expediente y descarga de archivo.
+En Windows local, respalda primero SQL y adjuntos, detén Comgraf con Ctrl+C en la terminal `start-local.ps1` y ejecuta desde la raíz:
 
-Sin Docker: respaldo, detener Python, instalar `requirements.lock.txt`, ejecutar `npm ci` y `npm run build`, aplicar `alembic upgrade head`, reiniciar. Para cambios de esquema crea nuevas revisiones; no edites migraciones ya aplicadas. `alembic check` detecta diferencias entre modelos y esquema.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\update-local.ps1
+powershell -ExecutionPolicy Bypass -File scripts\start-local.ps1
+```
+
+El actualizador comprueba la configuración, instala dependencias solo si cambiaron sus archivos de bloqueo (o con `-ForceDependencies`), compila React y aplica Alembic. Si algo falla, se detiene. Conserva `.env`, MySQL y los adjuntos; no borres `.runtime`.
+
+`/api/version` identifica versión de producto, build y contrato HTTP. Builds distintos no implican incompatibilidad por sí solos. Las operaciones de escritura exigen contrato 2. Ante incompatibilidad, ejecuta la actualización anterior y reinicia Python. El HTML exige revalidación y los assets conservan nombres versionados.
+
+Las migraciones `005_commercial_cancellation` y `006_cancelled_stage_snapshot` agregan trazabilidad y marcan anulaciones existentes para revisión; no cambian pagos, saldos ni etapas sin clasificar, y no se editan después de aplicadas. Las anulaciones antiguas requieren revisión explícita; no se ponen en cero automáticamente.
+
+Con Docker, después del respaldo: `docker compose build app` y `docker compose up -d app`. El arranque aplica Alembic antes de servir solicitudes. Comprueba `docker compose ps`, `/api/health`, login, expediente y descarga de archivo. Para instalar cambios sin Docker, usa el script Windows indicado arriba o ejecuta manualmente los pasos de Desarrollo sin Docker. Crea revisiones Alembic nuevas; no edites migraciones aplicadas. `alembic check` detecta diferencias entre modelos y esquema.
 
 ## Respaldo y restauración de Compose
 

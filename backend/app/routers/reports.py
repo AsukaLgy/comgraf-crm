@@ -45,6 +45,8 @@ def indicators(user=Depends(current_user), db=Depends(get_db, scope='function'))
     rework = 0
     for e in events:
         if e.data.get('action') == 'stage': stages[STAGE_LABELS.get(e.data['from'], e.data['from'])] += e.data.get('seconds', 0)
+        if e.data.get('action') in ('cancelled', 'delivery_completed') and e.data.get('stage'):
+            stages[STAGE_LABELS.get(e.data['stage'], e.data['stage'])] += e.data.get('seconds', 0)
         if e.data.get('action') == 'unblocked': blocked += e.data.get('seconds', 0)
         if e.data.get('rework') and e.data.get('action') == 'stage': rework += 1
     financial = defaultdict(lambda: {'delivered_pending': Decimal(0), 'overdue': Decimal(0)})

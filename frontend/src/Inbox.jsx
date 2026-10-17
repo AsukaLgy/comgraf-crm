@@ -14,8 +14,10 @@ export const VIEW_LABELS = {
   mine: 'Mis casos',
   production: 'Producción',
   ready: 'Listos para entregar',
-  balances: 'Entregados por cobrar',
+  balances: 'Saldos por cobrar',
   overdue: 'Cobros vencidos',
+  refunds: 'Devoluciones pendientes',
+  'cancellation-review': 'Anulaciones por resolver',
   finalized: 'Finalizados',
   history: 'Historial',
   all: 'Todos los expedientes',
@@ -123,11 +125,13 @@ export default function Inbox({ user, view = 'pool', home = false, search = fals
           </div>
         </section>
       )}
-      {['ready', 'balances', 'overdue'].includes(view) && (
+      {['ready', 'balances', 'overdue', 'refunds', 'cancellation-review'].includes(view) && (
         <div className="tabs section-tabs">
           {[
             'ready',
-            ...(can(user, 'finance') || can(user, 'attention') ? ['balances', 'overdue'] : []),
+            ...(can(user, 'finance') || can(user, 'attention')
+              ? ['balances', 'overdue', 'refunds', 'cancellation-review']
+              : []),
           ].map((v) => (
             <Link key={v} className={view === v ? 'active' : ''} to={'/inbox/' + v}>
               {VIEW_LABELS[v]} <Badge>{counts.data?.[v] ?? 0}</Badge>
@@ -263,7 +267,7 @@ export default function Inbox({ user, view = 'pool', home = false, search = fals
         {list.isPending ? (
           <Loading />
         ) : (
-          list.data && <CaseTable items={list.data.items} remember={remember} />
+          list.data && <CaseTable items={list.data.items} remember={remember} user={user} />
         )}
         <div className="list-footer">
           <span>

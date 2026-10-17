@@ -1,5 +1,6 @@
 import { Check } from 'lucide-react'
 import { Badge } from './components'
+import { money } from './api'
 import {
   PRODUCTION_STAGES,
   PRODUCTION_STAGE_LABELS,
@@ -7,10 +8,33 @@ import {
   PRODUCTION_NEXT_STAGE,
 } from './domain'
 
-const reason = { name: 'reason', label: 'Motivo', type: 'textarea', required: true }
-export default function ProductionStages({ record, canManage, onSchedule, operation }) {
+const reason = { name: 'reason', label: 'Motivo del retroceso', type: 'textarea', required: true }
+
+export default function ProductionStages({ record, canManage, onSchedule, onDelivery, operation }) {
   const production = record.production
   const currentIndex = PRODUCTION_STAGES.indexOf(production.stage)
+  const next = PRODUCTION_NEXT_STAGE[production.stage]
+  const previous = currentIndex > 0 ? PRODUCTION_STAGES.slice(0, currentIndex) : []
+
+  function classify() {
+    operation(
+      'production/stage',
+      'Clasificar etapa histórica',
+      [
+        {
+          name: 'stage',
+          label: 'Etapa física actual',
+          options: PRODUCTION_STAGES.map((value) => ({
+            value,
+            label: PRODUCTION_STAGE_LABELS[value],
+          })),
+          required: true,
+        },
+      ],
+      { stage: PRODUCTION_STAGE.NEW },
+    )
+  }
+
   return (
     <section className="production-path">
       <ol aria-label="Etapas de producción">
@@ -32,15 +56,26 @@ export default function ProductionStages({ record, canManage, onSchedule, operat
           </li>
         ))}
       </ol>
+
       {production.classification_required && (
         <div className="notice">
           La etapa histórica «{production.legacy_stage}» no permite inferir la etapa física actual.
           Clasifícala explícitamente para continuar.
         </div>
       )}
+
       {production.cancelled_at ? (
-        <div className="error">
-          Producción anulada · Los pagos y entregas permanecen registrados.
+        <div className={production.cancellation_review_pending ? 'notice' : 'error'}>
+          Producción anulada.
+          {production.cancellation_review_pending
+            ? ' Resolución económica pendiente.'
+            : record.balance === undefined
+              ? ' Consulta el saldo con un usuario financiero.'
+              : record.balance < 0
+                ? ` Pendiente de devolución: ${money(-Number(record.balance), production.currency)}`
+                : record.balance > 0
+                  ? ` Saldo por cobrar: ${money(record.balance, production.currency)}`
+                  : ' Saldo liquidado.'}
         </div>
       ) : (
         <div className="production-controls">
@@ -48,31 +83,9 @@ export default function ProductionStages({ record, canManage, onSchedule, operat
             {production.blocked_since && (
               <Badge tone="red">Bloqueado: {production.block_reason}</Badge>
             )}
-            {production.classification_required && canManage && (
-              <button
-                onClick={() =>
-                  operation(
-                    'production/stage',
-                    'Clasificar etapa actual',
-                    [
-                      {
-                        name: 'stage',
-                        label: 'Etapa física actual',
-                        options: PRODUCTION_STAGES.map((value) => ({
-                          value,
-                          label: PRODUCTION_STAGE_LABELS[value],
-                        })),
-                        required: true,
-                      },
-                    ],
-                    { stage: PRODUCTION_STAGE.NEW },
-                  )
-                }
-              >
-                Clasificar etapa
-              </button>
-            )}
-            {!production.classification_required && (
+            {production.classification_required ? (
+              canManage && <button onClick={classify}>Clasificar etapa</button>
+            ) : (
               <>
                 <strong>
                   {production.stage_label}
@@ -91,34 +104,105 @@ export default function ProductionStages({ record, canManage, onSchedule, operat
             record.delivery_status !== 'Completa' && (
               <div className="actions">
                 <button onClick={onSchedule}>Programar</button>
-                <button
-                  onClick={() =>
-                    operation(
-                      'production/stage',
-                      'Cambiar etapa',
-                      [
-                        {
-                          name: 'stage',
-                          label: 'Nueva etapa',
-                          options: PRODUCTION_STAGES.map((value) => ({
-                            value,
-                            label: PRODUCTION_STAGE_LABELS[value],
-                          })),
-                        },
-                        { ...reason, required: false },
-                      ],
-                      { stage: PRODUCTION_NEXT_STAGE[production.stage] || production.stage },
-                    )
-                  }
-                >
-                  Cambiar etapa
-                </button>
+                {production.stage === PRODUCTION_STAGE.READY ? (
+                  <>
+                    <button
+                      className="primary"
+                      onClick={onDelivery}
+                      disabled={Boolean(production.blocked_since)}
+                      title={
+                        production.blocked_since
+                          ? 'Resuelve el bloqueo antes de registrar entrega'
+                          : undefined
+                      }
+                    >
+                      Registrar entrega
+                    </button>
+                    {previous.length > 0 && (
+                      <button
+                        disabled={record.delivery_status !== 'Pendiente'}
+                        title={
+                          record.delivery_status !== 'Pendiente'
+                            ? 'No se puede retroceder tras registrar entregas'
+                            : undefined
+                        }
+                        onClick={() =>
+                          operation(
+                            'production/stage',
+                            'Retroceder etapa',
+                            [
+                              {
+                                name: 'stage',
+                                label: 'Regresar a',
+                                options: previous.map((value) => ({
+                                  value,
+                                  label: PRODUCTION_STAGE_LABELS[value],
+                                })),
+                                required: true,
+                              },
+                              reason,
+                            ],
+                            { stage: previous.at(-1) },
+                          )
+                        }
+                      >
+                        Retroceder
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <button
+                      disabled={Boolean(production.blocked_since) || !next}
+                      title={
+                        production.blocked_since ? 'Resuelve el bloqueo para avanzar' : undefined
+                      }
+                      onClick={() =>
+                        operation(
+                          'production/stage',
+                          `Avanzar a ${PRODUCTION_STAGE_LABELS[next]}`,
+                          [],
+                          { stage: next },
+                          undefined,
+                          `Avanzar a ${PRODUCTION_STAGE_LABELS[next]}`,
+                        )
+                      }
+                    >
+                      {next ? `Avanzar a ${PRODUCTION_STAGE_LABELS[next]}` : 'Etapa final'}
+                    </button>
+                    {previous.length > 0 && (
+                      <button
+                        onClick={() =>
+                          operation(
+                            'production/stage',
+                            'Retroceder etapa',
+                            [
+                              {
+                                name: 'stage',
+                                label: 'Regresar a',
+                                options: previous.map((value) => ({
+                                  value,
+                                  label: PRODUCTION_STAGE_LABELS[value],
+                                })),
+                                required: true,
+                              },
+                              reason,
+                            ],
+                            { stage: previous.at(-1) },
+                          )
+                        }
+                      >
+                        Retroceder
+                      </button>
+                    )}
+                  </>
+                )}
                 <button
                   onClick={() =>
                     operation(
                       `production/${production.blocked_since ? 'unblock' : 'block'}`,
                       production.blocked_since ? 'Resolver bloqueo' : 'Bloquear trabajo',
-                      [reason],
+                      [{ name: 'reason', label: 'Motivo', type: 'textarea', required: true }],
                     )
                   }
                 >

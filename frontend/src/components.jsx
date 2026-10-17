@@ -7,10 +7,23 @@ export function Badge({ children, tone = '' }) {
   return <span className={'badge ' + tone}>{children}</span>
 }
 export function ErrorBox({ error }) {
+  const guidance = {
+    VERSION_CONFLICT: 'Actualiza el expediente y revisa los datos antes de volver a guardar.',
+    SAME_STAGE: 'La etapa ya cambió. Actualiza el expediente para ver las acciones disponibles.',
+    INVALID_TRANSITION: 'Elige la etapa siguiente o usa Retroceder con un motivo.',
+    OVERDUE_FOLLOWUP: 'Completa o reprograma el seguimiento vencido y vuelve a intentar.',
+    PRODUCTION_BLOCKED: 'Resuelve el bloqueo de producción antes de avanzar.',
+    PERMISSION_DENIED: 'Tu rol no tiene permiso para esta operación.',
+    CLIENT_CONTRACT_MISMATCH:
+      'La interfaz y el servidor tienen contratos incompatibles. Ejecuta scripts/update-local.ps1 y reinicia Comgraf.',
+  }
   return error ? (
     <div role="alert" className="error">
       <AlertCircle size={16} />
-      <span>{error.message || error}</span>
+      <span>
+        {error.message || error}
+        {guidance[error.code] && <small className="error-guidance"> {guidance[error.code]}</small>}
+      </span>
     </div>
   ) : null
 }
@@ -154,6 +167,7 @@ export function Operation({
   fields = [],
   initial = {},
   children,
+  renderSummary,
   onClose,
   transform = (v) => v,
   submit = 'Guardar',
@@ -203,14 +217,14 @@ export function Operation({
                     options={f.options}
                     empty={f.empty}
                     value={v[f.name]}
-                    required={f.required}
+                    required={typeof f.required === 'function' ? f.required(v) : f.required}
                     onChange={(e) => set(f.name, e.target.value)}
                   />
                 ) : f.type === 'textarea' ? (
                   <Field key={f.name} label={f.label} className="full">
                     <textarea
                       rows={3}
-                      required={f.required}
+                      required={typeof f.required === 'function' ? f.required(v) : f.required}
                       value={v[f.name]}
                       onChange={(e) => set(f.name, e.target.value)}
                     />
@@ -232,6 +246,7 @@ export function Operation({
                 ),
               )}
           </div>
+          {renderSummary?.(v)}
         </>
       )}
     />

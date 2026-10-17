@@ -1,27 +1,37 @@
 # Verificación de Comgraf
 
-Comprobación local del 17 de octubre de 2026. Backend y E2E utilizan MySQL Community Server y la base separada `comgraf_test`; la base operativa `comgraf` no se utilizó para pruebas destructivas.
+Verificación de esta ronda en Windows, 17 de octubre de 2026. Las pruebas de backend y de navegador utilizaron MySQL local real en la base separada `comgraf_test`. La base operativa `comgraf` y sus adjuntos no se usaron para pruebas ni se reiniciaron.
 
-## Resultado de esta ronda
+## Resultado
 
-- `npm.cmd --prefix frontend run build`: correcta; Vite transformó 1817 módulos.
-- `npm.cmd --prefix frontend run lint`: correcta con ESLint 9.
-- `npm.cmd --prefix frontend run format:check`: correcta con Prettier.
-- `..\.venv\Scripts\python.exe -m ruff check app tests`: correcta.
-- `pytest tests -q -p no:cacheprovider`: 11 pruebas aprobadas sobre MySQL de pruebas. Cubren ciclo de atención, vencimientos, transacción de entrega+abono, permisos, idempotencia, clasificación histórica, paginación y contadores.
-- `alembic check`: sin diferencias pendientes entre modelos y esquema.
-- E2E con FastAPI y MySQL reales: 7 de 7 recorridos aprobados, incluyendo cierre directo, filtros y vistas guardadas, persistencia de borradores, recuperación de errores, autocompletado, conversión de cotización, producción, entrega parcial y posterior liquidación completa en el flujo combinado.
-- Migraciones 003/004 aplicadas a comgraf y comgraf_test. La comprobación de alcance de datos previo a 004 encontró un expediente y ningún seguimiento vencido asociado a atención cerrada; 004 no cambió estados de casos. No se borraron ni reiniciaron las bases.
+- `npm.cmd --prefix frontend run build`: correcto; Vite compiló 1817 módulos y emitió assets con nombres versionados.
+- `npm.cmd --prefix frontend run lint`: correcto.
+- `npm.cmd --prefix frontend run format:check`: correcto con Prettier.
+- `..\.venv\Scripts\python.exe -m ruff check app tests`: correcto.
+- `pytest tests -q -p no:cacheprovider`: 15 aprobadas en MySQL de pruebas.
+- `MYSQL_DATABASE=comgraf_test alembic check`: sin diferencias entre modelos y esquema; la base de pruebas está en `006_cancelled_stage_snapshot`.
+- Playwright contra FastAPI y MySQL reales: 9 de 9 recorridos aprobados, incluyendo toma desde bandeja, anulación con importe final, devolución real, consulta cerrada, borradores, persistencia de formularios ante error, autocompletado y conversión/entrega/cobranza.
 
-La suite backend vacía tablas únicamente en una base cuyo nombre termina en `_test`. Ejecutarla antes de `tests.seed_e2e`; nunca apuntarla a una base con datos que se deseen conservar. E2E también modifica exclusivamente esa base.
+## Anulación comercial comprobada
 
-## Límites
+El recorrido E2E creó una obligación de L 1,000, registró L 300 recibidos, acordó un total final de L 200, generó un ajuste de -L 800 y registró una devolución confirmada de L 100. El resultado quedó en saldo cero con una única devolución y todos los movimientos originales conservados. Las pruebas backend también verifican anulación sin pagos/sin cargo, revisión financiera pendiente, permisos, repetición idempotente, devolución parcial y rechazo de una devolución que excede el saldo a favor.
 
-- Docker no está instalado en este equipo; no se verificó `docker compose build/up`. La verificación se hizo con FastAPI y MySQL local reales.
-- Correo y WhatsApp siguen sin proveedor externo y no envían mensajes.
-- Las métricas que dependen de llamadas, visitas o mensajes externos dependen de registro manual.
-- Este CRM es control operativo de cobros y no reemplaza contabilidad ni fiscalidad.
-- Pruebas de reinicio de servicios/adjuntos y restauración de respaldo no se repitieron en esta ronda.
-- La interfaz del equipo local escucha en `127.0.0.1`; el acceso LAN usa Compose y debe restringirse a la red privada.
-- La revisión 003 normalizó los estados activos heredados a `Abierto` sin copiar el valor anterior a un evento. Para registros ya migrados no es posible reconstruir ese estado a partir de la base actual; la bitácora sí conserva el estado anterior/nuevo para cada cambio realizado desde esta versión.
-- El pago combinado en entrega muestra el saldo real precargado al activar el control. Se puede confirmar ese importe para liquidar o sustituirlo por un abono parcial; la autorización financiera sigue validándose en servidor.
+El primer intento E2E observó el saldo anterior porque el test consultaba el detalle inmediatamente después del clic sin esperar el fin de la petición asíncrona. La interfaz y bitácora mostraban la devolución confirmada; añadí una espera explícita al cierre exitoso del formulario antes de comprobar el GET persistido. El recorrido pasó después. No se reprodujo un fallo de cálculo o persistencia del backend.
+
+## Migraciones y base operativa
+
+Las nuevas revisiones `005_commercial_cancellation` y `006_cancelled_stage_snapshot` fueron aplicadas y validadas solo en `comgraf_test`. No apliqué migraciones a `comgraf`: el servicio local activo no fue detenido y esta ronda debía probarse con una base MySQL independiente. Para actualizar la instalación real, crear primero respaldo de SQL y adjuntos, detener Comgraf y ejecutar el procedimiento de actualización de `README.md`. Las anulaciones históricas quedan señaladas para revisión; no se cambian sus movimientos ni saldos automáticamente.
+
+## Errores reproducidos, riesgos corregidos e hipótesis
+
+- **Error reproducido y corregido:** condición de carrera en la aserción Playwright de devolución. El test ahora espera la confirmación del formulario.
+- **Riesgos corregidos por revisión e implementados:** deuda no resuelta presentada como exigible; cancelación que detenía el reloj pero no persistía etapa previa; falta de vista/propiedad de anulación y devolución pendiente; saldo/devolución sin flujo comercial; ordenamiento MySQL de fechas nulas; compatibilidad entre bundle HTTP y servidor sin identificación de contrato.
+- **Hipótesis no confirmada:** se había atribuido el fallo observado a persistencia inconsistente. No se confirmó: la inspección de la bitácora y el rerun identificaron una lectura de prueba anterior al fin del POST.
+
+## Límites de verificación
+
+- No ejecuté `scripts/update-local.ps1` contra la instalación operativa: requiere detener el servicio en puerto 8000 y aplicar migraciones a su base. El procedimiento se revisó; build y migraciones se ejecutaron por separado en el entorno de pruebas.
+- No se verificó Docker Compose porque Docker no está instalado en este equipo.
+- No repetí restauración de respaldo ni prueba de recuperación del servidor operativo.
+- Correo/WhatsApp no están conectados; interacciones externas siguen siendo registros manuales.
+- Los tests vacían las tablas solo en una base cuyo nombre termina en `_test`. No apuntarlos a datos operativos.

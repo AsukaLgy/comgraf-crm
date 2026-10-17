@@ -18,6 +18,7 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 | Actividad | `frontend/src/CaseActivity.jsx` | Canales manuales y bitácora. Las notas no abren atención; interacciones entrantes sí. |
 | Etapas | `frontend/src/ProductionStages.jsx` | Barra de cinco etapas, clasificación histórica, programación, bloqueos y retrocesos. |
 | Entrega y finanzas | `frontend/src/DeliveryFinance.jsx` | Registro parcial/completo y abono transaccional opcional, saldos y permisos financieros. |
+| Anulación comercial | `frontend/src/CasePage.jsx`, `DeliveryFinance.jsx`; `backend/app/services.py`, `repository.py` | Detener producción conservando entregas y movimientos; ajustar cargo final, resolver devoluciones o dejar revisión financiera pendiente. |
 | Ficha imprimible | `frontend/src/CasePrintSheet.jsx` | Salida de taller y especificaciones del expediente. |
 | Productos y conversión | `frontend/src/ProductForm.jsx` | Partidas, especificaciones, cotizaciones y ampliación del mismo caso a producción. |
 | Comunicación manual | `frontend/src/Composer.jsx` | Notas, interacciones y borradores locales/remotos; no envía mensajes externos. |
@@ -42,6 +43,10 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 - Todas las operaciones financieras nuevas son HNL. Los registros USD históricos no se convierten ni se mezclan con HNL.
 - `Case.version` y la clave idempotente protegen operaciones frente a doble envío y concurrencia. No quitar ambos controles de una mutación.
 - La bitácora refleja el evento real. No inventar aprobaciones, envíos externos, pagos ni entregas.
+- Una anulación conserva la obligación y movimientos anteriores; el ajuste de anulación cambia el cargo neto al total acordado. La devolución se registra como movimiento positivo solo cuando el usuario confirma que realmente la realizó.
+- Detener producción requiere permiso `production`; una persona sin permisos `finance`/`adjust` puede anular y dejar revisión pendiente. Puede ver el estado neutral de revisión, pero no los importes ni acceder a la bandeja financiera.
+- `cancellation_review_pending` impide presentar una obligación heredada o sin resolución como deuda exigible. Resolverla requiere permiso financiero y de ajuste; registrar devolución requiere permiso financiero e idempotencia.
+- Las órdenes anuladas antes de la resolución comercial quedan para revisión por migración. No se les añade un ajuste ni se cambia el saldo automáticamente.
 - La autorización del servidor es obligatoria aunque la interfaz oculte una acción. Las reglas críticas no se duplican solo como validación React.
 - Al calcular saldos, no reinterpretar condiciones históricas de pago ni cambiar importes o vencimientos sin una acción auditada y una decisión comercial.
 
@@ -61,6 +66,7 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 - Los nombres de las opciones visibles están centralizados en `frontend/src/domain.js`. Los esquemas Python son autoridad y deben actualizarse en el mismo cambio.
 - Evitar lógica temporal basada en la zona del navegador. Usar la zona que entrega el servidor y las utilidades de `frontend/src/api.js`.
 - `.env`, `.runtime`, adjuntos y `.vscode` son configuración/datos locales; no son parte de cambios de producto ni deben copiarse a Git.
+- Antes de una actualización local, detener Python y ejecutar `scripts/update-local.ps1`; compila frontend y aplica migraciones sin limpiar MySQL ni adjuntos. Después reiniciar con `scripts/start-local.ps1`. `/api/version` diferencia producto, build y contrato HTTP.
 
 ## Consultas de bandeja
 

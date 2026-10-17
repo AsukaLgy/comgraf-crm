@@ -1,61 +1,43 @@
-import { Plus } from 'lucide-react'
 import { can, date, localDate, money, quantity } from './api'
 import { Badge, Empty, Panel } from './components'
-import { HNL_CURRENCY, PRODUCTION_STAGE } from './domain'
+import { HNL_CURRENCY } from './domain'
 
-export default function DeliveryFinance({
-  record,
-  user,
-  finance,
-  canProduce,
-  onOperation,
-  onDelivery,
-}) {
+export default function DeliveryFinance({ record, user, finance, onOperation }) {
   const production = record.production
-  const canDeliver =
-    canProduce &&
-    production.stage === PRODUCTION_STAGE.READY &&
-    record.delivery_status !== 'Completa' &&
-    !production.blocked_since &&
-    !production.cancelled_at
-
   return (
     <Panel
       title="Entregas y cobros"
       action={
         <div className="actions">
-          {canDeliver && (
-            <button onClick={onDelivery}>
-              <Plus size={15} />
-              Registrar entrega
-            </button>
-          )}
-          {finance && !production.cancelled_at && production.currency === HNL_CURRENCY && (
-            <button
-              className="primary"
-              onClick={() =>
-                onOperation(
-                  'payments',
-                  'Registrar abono',
-                  [
-                    { name: 'kind', label: 'Tipo', options: ['Anticipo', 'Abono'] },
-                    {
-                      name: 'amount',
-                      label: `Importe (${HNL_CURRENCY})`,
-                      type: 'number',
-                      min: '0.01',
-                      step: '0.01',
-                      required: true,
-                    },
-                    { name: 'reference', label: 'Referencia / comprobante', required: true },
-                  ],
-                  { kind: 'Abono' },
-                )
-              }
-            >
-              Registrar abono
-            </button>
-          )}
+          {finance &&
+            !production.cancellation_review_pending &&
+            production.currency === HNL_CURRENCY &&
+            Number(record.balance) > 0 && (
+              <button
+                className="primary"
+                onClick={() =>
+                  onOperation(
+                    'payments',
+                    'Registrar abono',
+                    [
+                      { name: 'kind', label: 'Tipo', options: ['Anticipo', 'Abono'] },
+                      {
+                        name: 'amount',
+                        label: `Importe (${HNL_CURRENCY})`,
+                        type: 'number',
+                        min: '0.01',
+                        step: '0.01',
+                        required: true,
+                      },
+                      { name: 'reference', label: 'Referencia / comprobante', required: true },
+                    ],
+                    { kind: 'Abono' },
+                  )
+                }
+              >
+                Registrar abono
+              </button>
+            )}
           {can(user, 'adjust') &&
             !production.cancelled_at &&
             production.currency === HNL_CURRENCY && (
@@ -87,6 +69,35 @@ export default function DeliveryFinance({
                 Ajuste
               </button>
             )}
+          {finance &&
+            production.cancelled_at &&
+            !production.cancellation_review_pending &&
+            Number(record.balance) < 0 &&
+            production.currency === HNL_CURRENCY && (
+              <button
+                className="primary"
+                onClick={() =>
+                  onOperation(
+                    'production/refunds',
+                    'Registrar devolución realizada',
+                    [
+                      {
+                        name: 'amount',
+                        label: `Importe a devolver (máximo ${money(-Number(record.balance), production.currency)})`,
+                        type: 'number',
+                        min: '0.01',
+                        step: '0.01',
+                        required: true,
+                      },
+                      { name: 'reference', label: 'Referencia de la devolución', required: true },
+                    ],
+                    { amount: (-Number(record.balance)).toFixed(2) },
+                  )
+                }
+              >
+                Registrar devolución
+              </button>
+            )}
         </div>
       }
     >
@@ -97,8 +108,10 @@ export default function DeliveryFinance({
             <strong>{money(production.price, production.currency)}</strong>
           </div>
           <div>
-            <small>Saldo pendiente</small>
-            <strong>{money(record.balance, production.currency)}</strong>
+            <small>
+              {Number(record.balance) < 0 ? 'Pendiente de devolución' : 'Saldo pendiente'}
+            </small>
+            <strong>{money(Math.abs(Number(record.balance || 0)), production.currency)}</strong>
           </div>
           <div>
             <small>Saldo vencido</small>
@@ -120,7 +133,7 @@ export default function DeliveryFinance({
           </div>
         </div>
       ) : (
-        <p className="notice">Importes restringidos al rol de Cobranza.</p>
+        <p className="notice">Importes restringidos a los roles financieros y de atención.</p>
       )}
       {finance && production.currency !== HNL_CURRENCY && (
         <p className="notice">

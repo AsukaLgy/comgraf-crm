@@ -1,10 +1,12 @@
 import { Link } from 'react-router-dom'
-import { date, money } from './api'
-import { Badge, Empty } from './components'
+import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { api, can, date, money, uid } from './api'
+import { Badge, Empty, ErrorBox } from './components'
 import { PRODUCTION_STAGE_LABELS } from './domain'
 
 // Shared read-only row projection for operational pools and customer history.
-export default function CaseTable({ items, remember }) {
+export default function CaseTable({ items, remember, user }) {
   if (!items.length) return <Empty />
 
   return (
@@ -31,6 +33,7 @@ export default function CaseTable({ items, remember }) {
                   <strong>{record.subject}</strong>
                 </Link>
                 {record.requires_action && <span className="action-dot" title="Requiere acción" />}
+                {!record.owner_id && can(user, 'attention') && <TakeCaseButton record={record} />}
               </td>
               <td>{record.client.name}</td>
               <td>{record.owner_name || <span className="muted">Sin asignar</span>}</td>
@@ -60,6 +63,10 @@ export default function CaseTable({ items, remember }) {
                 {record.balance === undefined
                   ? '—'
                   : money(record.balance, record.production?.currency)}
+                {record.production?.cancellation_review_pending && (
+                  <small className="text-red">Resolución de anulación pendiente</small>
+                )}
+                {record.balance < 0 && <small>Pendiente de devolución</small>}
                 {record.payment_status === 'Vencido' && <small className="text-red">Vencido</small>}
               </td>
             </tr>
@@ -67,6 +74,40 @@ export default function CaseTable({ items, remember }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+function TakeCaseButton({ record }) {
+  const qc = useQueryClient()
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+  async function take() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api(`/cases/${record.id}/take`, {
+        method: 'POST',
+        body: { version: record.version, key: uid() },
+      })
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['cases'] }),
+        qc.invalidateQueries({ queryKey: ['counts'] }),
+      ])
+    } catch (cause) {
+      setError(cause)
+      if (cause.status === 409) await qc.invalidateQueries({ queryKey: ['cases'] })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <span className="case-row-take">
+      <button onClick={take} disabled={busy}>
+        {busy ? 'Tomando…' : 'Tomar caso'}
+      </button>
+      {error && <ErrorBox error={error} />}
+    </span>
   )
 }
 

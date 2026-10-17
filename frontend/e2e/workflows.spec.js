@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 const credentials = JSON.parse(fs.readFileSync(path.resolve('../.runtime/e2e.json'), 'utf8'))
-const headers = { 'X-Comgraf-Request': '1' }
+const headers = { 'X-Comgraf-Request': '1', 'X-Comgraf-Contract': '2', 'X-Comgraf-Build': '1.1.0' }
 let errors = []
 test.beforeEach(async ({ page }) => {
   errors = []
@@ -34,6 +34,87 @@ async function createCase(page, subject) {
   await expect(page.getByRole('dialog')).toHaveCount(0)
   return record
 }
+
+test('tomar un caso sin asignar desde la bandeja actualiza la fila', async ({ page }) => {
+  const clientResponse = await page.request.post('/api/clients', {
+    headers,
+    data: { name: 'E2E · Pool ' + Date.now() },
+  })
+  expect(clientResponse.ok()).toBeTruthy()
+  const client = await clientResponse.json()
+  const response = await page.request.post('/api/cases', {
+    headers,
+    data: { client_id: client.id, subject: 'E2E caso para tomar desde bandeja' },
+  })
+  expect(response.ok()).toBeTruthy()
+  await page.goto('/inbox/pool')
+  const row = page.getByRole('row').filter({ hasText: 'E2E caso para tomar desde bandeja' })
+  await row.getByRole('button', { name: 'Tomar caso' }).click()
+  await expect(row).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /Mis casos/ })).toBeVisible()
+})
+
+test('anular con importe final calcula devolución y registra devolución real', async ({ page }) => {
+  const record = await createCase(page, 'E2E Anulación comercial con devolución')
+  const current = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  const convertedResponse = await page.request.post(`/api/cases/${record.id}/convert`, {
+    headers,
+    data: {
+      version: current.version,
+      key: `e2e-convert-${Date.now()}`,
+      items: [
+        {
+          product: 'Tarjetas de presentación',
+          quantity: '100',
+          unit: 'unidades',
+          unit_price: '10.00',
+          specs: { width: '9', height: '5', material: 'Couché 300 g', sides: '2', inks: 'CMYK' },
+        },
+      ],
+      currency: 'HNL',
+      payment_terms: 'Contado',
+      advance_required: '0.00',
+      payment_due_date: '2099-12-31',
+      delivery_method: 'Retiro en taller',
+    },
+  })
+  expect(convertedResponse.ok()).toBeTruthy()
+  const converted = await convertedResponse.json()
+  const paidResponse = await page.request.post(`/api/cases/${record.id}/payments`, {
+    headers,
+    data: {
+      version: converted.version,
+      key: `e2e-payment-${Date.now()}`,
+      amount: '300.00',
+      kind: 'Anticipo',
+      reference: 'Anticipo E2E',
+    },
+  })
+  expect(paidResponse.ok()).toBeTruthy()
+
+  await page.goto(`/cases/${record.id}`)
+  await page.getByRole('button', { name: 'Producción', exact: true }).click()
+  await page.getByRole('button', { name: 'Anular trabajo', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Motivo de anulación').fill('Se cancela antes de terminar el trabajo')
+  await dialog.getByLabel('Tratamiento económico').selectOption('IMPORTE_FINAL')
+  await dialog.getByLabel('Importe final acordado (HNL)').fill('200.00')
+  await expect(dialog.getByText(/Pendiente de devolución/)).toBeVisible()
+  await expect(dialog.getByText(/L\s*100\.00/)).toBeVisible()
+  await dialog.getByRole('button', { name: 'Guardar' }).click()
+  await expect(page.getByText(/Pendiente de devolución/).first()).toBeVisible()
+
+  await page.getByRole('button', { name: 'Entregas y cobros', exact: true }).click()
+  await page.getByRole('button', { name: 'Registrar devolución' }).click()
+  const refundDialog = page.getByRole('dialog')
+  await expect(refundDialog.getByLabel(/Importe a devolver/)).toHaveValue('100.00')
+  await refundDialog.getByLabel('Referencia de la devolución').fill('Transferencia devuelta E2E')
+  await refundDialog.getByRole('button', { name: 'Guardar' }).click()
+  await expect(refundDialog).toHaveCount(0)
+  const final = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  expect(final.balance).toBe('0.00')
+  expect(final.ledger.filter((entry) => entry.kind === 'Devolución')).toHaveLength(1)
+})
 
 test('consulta presencial, notas, seguimiento y cierre sin producción', async ({ page }) => {
   await createCase(page, 'E2E Consulta presencial sin producción')
@@ -306,12 +387,12 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   await dialog.getByLabel('Versión del arte').fill('v1')
   await dialog.getByRole('button', { name: 'Guardar' }).click()
   await page.getByRole('button', { name: 'Producción' }).click()
-  for (const stage of ['APPROVAL', 'PRINTING', 'WORKSHOP', 'READY']) {
-    await page.getByRole('button', { name: 'Cambiar etapa' }).click()
+  for (const stage of ['Aprobación', 'Impresión', 'Taller', 'Listo para entregar']) {
+    await page.getByRole('button', { name: `Avanzar a ${stage}` }).click()
     dialog = page.getByRole('dialog')
-    await dialog.getByLabel('Nueva etapa').selectOption(stage)
-    await dialog.getByRole('button', { name: 'Guardar' }).click()
+    await dialog.getByRole('button', { name: `Avanzar a ${stage}` }).click()
   }
+  await expect(page.getByRole('button', { name: 'Registrar entrega', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Bloquear' }).click()
   dialog = page.getByRole('dialog')
   await dialog.getByLabel('Motivo').fill('Inspección preventiva del pedido.')

@@ -2,9 +2,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import uuid
+from fastapi.testclient import TestClient
+from app.main import app
 from app.db import engine, SessionLocal
 from app.config import settings
-from app.models import Case, Production, Ledger, Item, Quote, Task
+from app.models import Case, Production, Ledger, Item, Quote, Task, Role, User
 from app.repository import today
 from app.services import reopen_overdue_attention
 
@@ -307,5 +309,78 @@ def test_permissions_files_csrf_and_cancellation(clients,accounts):
     bad=api.post(f'/api/cases/{c["id"]}/attachments',files={'file':('evil.pdf',b'<script>bad</script>','application/pdf')})
     assert bad.status_code==422
     c=mutate(api,c,'payments',{'amount':'100','reference':'Anticipo'})
-    c=mutate(api,c,'production/cancel',{'reason':'Cliente cancela pedido'})
+    c=mutate(api,c,'production/cancel',{'reason':'Cliente cancela pedido','treatment':'IMPORTE_FINAL','final_amount':'1000.00'})
     assert c['balance']=='900.00' and len(c['ledger'])==2 and c['production']['cancelled_at']
+
+
+def test_cancellation_final_amount_refunds_and_idempotency(clients):
+    api=clients['admin']
+    _,c=create(api,'Anulación con anticipo')
+    c=mutate(api,c,'take'); c=mutate(api,c,'convert',conversion())
+    c=mutate(api,c,'payments',{'amount':'300.00','reference':'Anticipo real'})
+    body={'version':c['version'],'key':key(),'reason':'Cliente acordó conservar solo diseño','treatment':'IMPORTE_FINAL','final_amount':'200.00'}
+    c=must(api.post(f'/api/cases/{c["id"]}/production/cancel',json=body))
+    assert c['balance']=='-100.00' and c['payment_status']=='A favor'
+    assert c['production']['cancellation_final_amount']=='200.00'
+    assert [entry['kind'] for entry in c['ledger']][-1]=='Ajuste de anulación'
+    same=must(api.post(f'/api/cases/{c["id"]}/production/cancel',json=body))
+    assert same['balance']=='-100.00' and len(same['ledger'])==3
+    refund_body={'version':c['version'],'key':key(),'amount':'50.00','reference':'Transferencia 01'}
+    c=must(api.post(f'/api/cases/{c["id"]}/production/refunds',json=refund_body))
+    assert c['balance']=='-50.00'
+    over={**refund_body,'version':c['version'],'key':key(),'amount':'50.01'}
+    assert api.post(f'/api/cases/{c["id"]}/production/refunds',json=over).status_code==422
+    refund_body['version']=c['version']
+    c=must(api.post(f'/api/cases/{c["id"]}/production/refunds',json=refund_body))
+    repeated=must(api.post(f'/api/cases/{c["id"]}/production/refunds',json=refund_body))
+    assert repeated['balance']=='-50.00' and len(repeated['ledger'])==4
+    assert api.get('/api/cases?view=mine').json()['total']==1
+    assert api.get('/api/cases?view=refunds').json()['total']==1
+
+
+def test_cancellation_without_payment_clears_charge_and_cannot_fake_refund(clients):
+    api=clients['admin'];_,c=create(api,'Anulación sin anticipo')
+    c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
+    c=mutate(api,c,'production/cancel',{'reason':'El cliente desistió','treatment':'SIN_CARGO'})
+    assert c['balance']=='0.00' and c['payment_status']=='Pagado'
+    assert c['production']['cancellation_final_amount']=='0.00'
+    assert len([x for x in c['ledger'] if x['kind']=='Ajuste de anulación'])==1
+    assert c['production']['active_elapsed_seconds'] is None
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
+    assert api.get('/api/cases?view=mine').json()['total']==0
+
+
+def test_cancellation_without_finance_queues_review_then_resolves(clients,accounts):
+    with SessionLocal.begin() as db:
+        role_name='Anulador'+key()[:8]
+        db.add(Role(name=role_name,permissions=['production']))
+        user=User(username='cancelador',name='Cancelador',password_hash='unused',roles=[role_name],capacity=20)
+        db.add(user);db.flush(); uid=user.id
+    api=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'2'})
+    with SessionLocal.begin() as db:
+        user=db.get(User,uid)
+        user.password_hash=__import__('app.security',fromlist=['passwords']).passwords.hash('cancelador-password-2026')
+    must(api.post('/api/auth/login',json={'username':'cancelador','password':'cancelador-password-2026'}))
+    admin=clients['admin'];_,c=create(admin,'Anulación con revisión')
+    c=mutate(admin,c,'take');c=mutate(admin,c,'convert',conversion())
+    c=must(api.post(f'/api/cases/{c["id"]}/production/cancel',json={'version':c['version'],'key':key(),'reason':'Solicitar revisión económica'}))
+    assert c['production']['cancellation_review_pending'] and c['payment_status']=='Revisión de anulación'
+    assert api.get('/api/cases?view=cancellation-review').status_code==403
+    assert admin.get('/api/cases?view=cancellation-review').json()['total']==1
+    denied=api.post(f'/api/cases/{c["id"]}/production/cancel/resolve',json={'version':c['version'],'key':key(),'reason':'No debe modificar el cargo','treatment':'SIN_CARGO'})
+    assert denied.status_code==403
+    resolved=mutate(clients['admin'],c,'production/cancel/resolve',{'reason':'Acuerdo revisado','treatment':'SIN_CARGO'})
+    assert not resolved['production']['cancellation_review_pending'] and resolved['balance']=='0.00'
+    api.close()
+
+
+def test_due_sort_is_mysql_compatible_and_filters_validate(clients):
+    api=clients['admin'];_,c=create(api,'Orden sin compromiso')
+    c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
+    result=api.get('/api/cases?view=mine&sort=due')
+    assert result.status_code==200, result.text
+    assert result.json()['items'][0]['id']==c['id']
+    assert api.get('/api/cases?view=mine&due=fecha-mala').status_code==422
+    assert api.get('/api/cases?view=mine&client_id=texto').status_code==422
+    mismatch=api.post(f'/api/cases/{c["id"]}/take',json={'version':c['version'],'key':key()},headers={'X-Comgraf-Contract':'1'})
+    assert mismatch.status_code==409 and mismatch.json()['code']=='CLIENT_CONTRACT_MISMATCH'

@@ -55,6 +55,11 @@ def attention(case_id: int, data: s.CaseUpdate, user=Depends(current_user), db=D
     return case_response(db, user, service.update_case(db, user, case_id, data))
 
 
+@router.post('/cases/{case_id}/details')
+def details(case_id: int, data: s.CaseDetailsInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_response(db, user, service.update_case_details(db, user, case_id, data))
+
+
 @router.post('/cases/{case_id}/events')
 def events(case_id: int, data: s.EventInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_response(db, user, service.add_event(db, user, case_id, data))

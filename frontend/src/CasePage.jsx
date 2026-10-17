@@ -30,13 +30,35 @@ export default function CasePage({ user, print = false }) {
     users = people.data || [],
     close = () => setModal(null)
   const attention = can(user, 'attention') && (c.owner_id === user.id || can(user, 'assign')),
+    canTake = can(user, 'attention') && !c.owner_id,
     production = can(user, 'production'),
     finance = can(user, 'finance')
   const person = (id) => users.find((u) => u.id === id)?.name || 'Sin asignar'
   const personOptions = (permission) =>
     users.filter((u) => u.active && can(u, permission)).map((u) => ({ value: u.id, label: u.name }))
-  const operation = (path, title, fields = [], initial = {}, transform, submit, method = 'POST') =>
-    setModal({ type: 'operation', path, title, fields, initial, transform, submit, method })
+  const operation = (
+    path,
+    title,
+    fields = [],
+    initial = {},
+    transform,
+    submit,
+    method = 'POST',
+    children,
+    renderSummary,
+  ) =>
+    setModal({
+      type: 'operation',
+      path,
+      title,
+      fields,
+      initial,
+      transform,
+      submit,
+      method,
+      children,
+      renderSummary,
+    })
   const assign = () =>
     operation(
       'assign',
@@ -182,6 +204,7 @@ export default function CasePage({ user, print = false }) {
         record={c}
         person={person}
         canAttend={attention}
+        canTake={canTake}
         canAssign={can(user, 'assign')}
         onTake={() => operation('take', 'Tomar caso', [], {}, undefined, 'Tomar caso')}
         onAssign={assign}
@@ -190,12 +213,30 @@ export default function CasePage({ user, print = false }) {
         attentionError={attentionError}
         attentionBusy={attentionBusy}
         onRefresh={() => query.refetch()}
+        onEdit={() =>
+          operation(
+            'details',
+            'Editar datos del caso',
+            [
+              {
+                name: 'priority',
+                label: 'Prioridad',
+                options: ['Baja', 'Normal', 'Alta', 'Urgente'],
+                required: true,
+              },
+              { name: 'next_action', label: 'Próxima acción', required: false },
+            ],
+            { priority: c.priority, next_action: c.next_action },
+            (v) => ({ priority: v.priority, next_action: v.next_action }),
+          )
+        }
       />
       {p && (
         <ProductionStages
           record={c}
           canManage={production}
           onSchedule={schedule}
+          onDelivery={delivery}
           operation={operation}
         />
       )}
@@ -327,25 +368,117 @@ export default function CasePage({ user, print = false }) {
               ))}
               <h3>Instrucciones</h3>
               <p className="prewrap">{p.instructions || 'Sin instrucciones adicionales'}</p>
-              {can(user, 'assign') && !p.cancelled_at && c.delivery_status !== 'Completa' && (
+              {can(user, 'production') && !p.cancelled_at && c.delivery_status !== 'Completa' && (
                 <button
                   className="danger"
-                  onClick={() => operation('production/cancel', 'Anular trabajo', [reason])}
+                  onClick={() =>
+                    operation(
+                      'production/cancel',
+                      'Anular trabajo',
+                      [
+                        { ...reason, label: 'Motivo de anulación' },
+                        ...(finance && can(user, 'adjust')
+                          ? [
+                              {
+                                name: 'treatment',
+                                label: 'Tratamiento económico',
+                                options: [
+                                  { value: 'SIN_CARGO', label: 'Sin cargo por cancelación' },
+                                  {
+                                    value: 'IMPORTE_FINAL',
+                                    label: 'Con importe final acordado a cobrar',
+                                  },
+                                ],
+                                empty: 'Seleccionar tratamiento',
+                                required: true,
+                              },
+                              {
+                                name: 'final_amount',
+                                label: 'Importe final acordado (HNL)',
+                                type: 'number',
+                                min: '0',
+                                step: '0.01',
+                                required: (v) => v.treatment === 'IMPORTE_FINAL',
+                                when: (v) => v.treatment === 'IMPORTE_FINAL',
+                              },
+                            ]
+                          : []),
+                      ],
+                      {},
+                      (v) => ({
+                        reason: v.reason,
+                        ...(v.treatment ? { treatment: v.treatment } : {}),
+                        ...(v.treatment === 'IMPORTE_FINAL'
+                          ? { final_amount: v.final_amount }
+                          : {}),
+                      }),
+                      undefined,
+                      undefined,
+                      <CancellationSummary record={c} />,
+                      (values) => <CancellationPreview record={c} values={values} />,
+                    )
+                  }
                 >
-                  Anular trabajo con motivo
+                  Anular trabajo
                 </button>
               )}
+              {p.cancelled_at &&
+                p.cancellation_review_pending &&
+                finance &&
+                can(user, 'adjust') && (
+                  <button
+                    className="primary"
+                    onClick={() =>
+                      operation(
+                        'production/cancel/resolve',
+                        'Resolver situación económica de la anulación',
+                        [
+                          { ...reason, label: 'Nota de resolución' },
+                          {
+                            name: 'treatment',
+                            label: 'Tratamiento económico',
+                            options: [
+                              { value: 'SIN_CARGO', label: 'Sin cargo por cancelación' },
+                              {
+                                value: 'IMPORTE_FINAL',
+                                label: 'Con importe final acordado a cobrar',
+                              },
+                            ],
+                            empty: 'Seleccionar tratamiento',
+                            required: true,
+                          },
+                          {
+                            name: 'final_amount',
+                            label: 'Importe final acordado (HNL)',
+                            type: 'number',
+                            min: '0',
+                            step: '0.01',
+                            required: (v) => v.treatment === 'IMPORTE_FINAL',
+                            when: (v) => v.treatment === 'IMPORTE_FINAL',
+                          },
+                        ],
+                        {},
+                        (v) => ({
+                          reason: v.reason,
+                          treatment: v.treatment,
+                          ...(v.treatment === 'IMPORTE_FINAL'
+                            ? { final_amount: v.final_amount }
+                            : {}),
+                        }),
+                        undefined,
+                        undefined,
+                        <CancellationSummary record={c} />,
+                        (values) => <CancellationPreview record={c} values={values} />,
+                      )
+                    }
+                  >
+                    Resolver situación económica
+                  </button>
+                )}
             </Panel>
           )}
           {section === 'Entregas y cobros' && p && (
-            <DeliveryFinance
-              record={c}
-              user={user}
-              finance={finance}
-              canProduce={production}
-              onOperation={operation}
-              onDelivery={delivery}
-            />
+            <DeliveryFinance record={c} user={user} finance={finance} onOperation={operation} />
           )}
           {section === 'Archivos' && (
             <Panel
@@ -562,5 +695,78 @@ export default function CasePage({ user, print = false }) {
         />
       )}
     </>
+  )
+}
+
+function CancellationSummary({ record }) {
+  const ledger = record.ledger || []
+  const payments = ledger
+    .filter((entry) => ['Anticipo', 'Abono', 'Reversión de pago'].includes(entry.kind))
+    .reduce((sum, entry) => sum - Number(entry.amount), 0)
+  const refunds = ledger
+    .filter((entry) => entry.kind === 'Devolución')
+    .reduce((sum, entry) => sum + Number(entry.amount), 0)
+  const items = record.items || []
+  return (
+    <div className="notice">
+      <strong>Resumen antes de anular</strong>
+      <p>Etapa: {record.production.stage_label || 'Pendiente de clasificación'}</p>
+      {items.map((item) => {
+        const delivered = (record.deliveries || [])
+          .filter((delivery) => delivery.item_id === item.id)
+          .reduce((sum, delivery) => sum + Number(delivery.quantity), 0)
+        return (
+          <p key={item.id}>
+            {item.product}: {quantity(delivered)} de {quantity(item.quantity)} {item.unit}{' '}
+            entregados
+          </p>
+        )
+      })}
+      {record.balance !== undefined ? (
+        <>
+          <p>Pagos netos recibidos: {money(payments, record.production.currency)}</p>
+          <p>Devoluciones ya registradas: {money(refunds, record.production.currency)}</p>
+          <p>Saldo financiero actual: {money(record.balance, record.production.currency)}</p>
+        </>
+      ) : (
+        <p>El resumen económico está restringido a usuarios con permisos financieros.</p>
+      )}
+      {record.production.currency === HNL_CURRENCY && (
+        <p>El importe final acordado es el total definitivo, no un cargo adicional.</p>
+      )}
+    </div>
+  )
+}
+
+function CancellationPreview({ record, values }) {
+  if (record.balance === undefined || !values.treatment) return null
+  const chargeKinds = ['Obligación', 'Ajuste', 'Ajuste de anulación']
+  const currentCharges = (record.ledger || [])
+    .filter((entry) => chargeKinds.includes(entry.kind))
+    .reduce((sum, entry) => sum + Number(entry.amount), 0)
+  const finalAmount = values.treatment === 'SIN_CARGO' ? 0 : Number(values.final_amount)
+  if (!Number.isFinite(finalAmount)) return null
+  const adjustment = finalAmount - currentCharges
+  const resultingBalance = Number(record.balance) + adjustment
+  return (
+    <div className="notice" aria-live="polite">
+      <strong>Vista previa del resultado</strong>
+      <p>Cargo neto definitivo: {money(finalAmount, record.production.currency)}</p>
+      <p>Ajuste de anulación: {money(adjustment, record.production.currency)}</p>
+      {resultingBalance > 0 ? (
+        <p>Saldo por cobrar: {money(resultingBalance, record.production.currency)}</p>
+      ) : resultingBalance < 0 ? (
+        <p>Pendiente de devolución: {money(-resultingBalance, record.production.currency)}</p>
+      ) : (
+        <p>
+          Saldo resultante: {money(0, record.production.currency)} · sin cobro ni devolución
+          pendientes.
+        </p>
+      )}
+      <small>
+        La vista previa no registra una devolución. El servidor vuelve a calcular el ajuste al
+        guardar.
+      </small>
+    </div>
   )
 }

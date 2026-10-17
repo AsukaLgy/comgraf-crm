@@ -7,6 +7,7 @@ export default function CaseAttention({
   record,
   person,
   canAttend,
+  canTake,
   canAssign,
   onTake,
   onAssign,
@@ -15,6 +16,7 @@ export default function CaseAttention({
   attentionError,
   attentionBusy,
   onRefresh,
+  onEdit,
 }) {
   return (
     <>
@@ -34,7 +36,7 @@ export default function CaseAttention({
           </div>
         </div>
         <div className="actions">
-          {!record.owner_id && canAttend && (
+          {!record.owner_id && canTake && (
             <button className="primary" onClick={onTake}>
               <UserRound size={15} />
               Tomar caso
@@ -92,6 +94,7 @@ export default function CaseAttention({
             )}
           </>
         )}
+        {canAttend && <button onClick={onEdit}>Editar datos del caso</button>}
         {record.related_case_id && (
           <Link to={`/cases/${record.related_case_id}`}>Caso relacionado</Link>
         )}

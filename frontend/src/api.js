@@ -1,14 +1,46 @@
 import {HNL_CURRENCY} from './domain'
 
+export const API_CONTRACT_VERSION = '2'
+export const PRODUCT_VERSION = '1.1.0'
+let contractCheck
+
+async function assertContract() {
+  if (!contractCheck) {
+    contractCheck = fetch('/api/version', { credentials: 'same-origin', cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          const error = new Error('No se pudo comprobar la versión del servidor. Actualiza y reinicia Comgraf.')
+          error.code = 'CLIENT_CONTRACT_MISMATCH'
+          throw error
+        }
+        return response.json()
+      })
+      .catch((error) => {
+        contractCheck = null
+        throw error
+      })
+  }
+  const version = await contractCheck
+  if (String(version.contract_version) !== API_CONTRACT_VERSION) {
+    const error = new Error(`La interfaz ${PRODUCT_VERSION} usa el contrato ${API_CONTRACT_VERSION}, pero el servidor ofrece el contrato ${version.contract_version}. Ejecuta scripts/update-local.ps1 y reinicia Comgraf.`)
+    error.code = 'CLIENT_CONTRACT_MISMATCH'
+    throw error
+  }
+}
+
 export async function api(path, options = {}) {
   const {body, ...rest} = options
+  if ((rest.method || 'GET').toUpperCase() !== 'GET') await assertContract()
   let response
-  try { response = await fetch('/api' + path, {credentials: 'same-origin', ...rest, headers: {'X-Comgraf-Request': '1', ...(body instanceof FormData ? {} : {'Content-Type': 'application/json'}), ...rest.headers}, body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body)}) }
+  try { response = await fetch('/api' + path, {credentials: 'same-origin', ...rest, headers: {'X-Comgraf-Request': '1', 'X-Comgraf-Contract': API_CONTRACT_VERSION, 'X-Comgraf-Build': PRODUCT_VERSION, ...(body instanceof FormData ? {} : {'Content-Type': 'application/json'}), ...rest.headers}, body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body)}) }
   catch { throw new Error('No se pudo conectar. Tus datos permanecen en el formulario.') }
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const detail = Array.isArray(data.detail) ? data.detail.map(x => `${x.loc.slice(1).join('.')}: ${x.msg}`).join(' · ') : data.detail
-    const error = new Error(detail || 'No se pudo guardar. Reintenta.'); error.status = response.status; throw error
+    const detail = Array.isArray(data.detail) ? data.detail.map(x => `${x.loc.slice(1).join('.')}: ${x.msg}`).join(' · ') : typeof data.detail === 'object' ? data.detail?.message : data.detail
+    const error = new Error(detail || 'No se pudo guardar. Reintenta.')
+    error.status = response.status
+    error.code = data.code || (response.status === 403 ? 'PERMISSION_DENIED' : response.status === 422 ? 'FIELD_VALIDATION' : 'HTTP_ERROR')
+    throw error
   }
   return data
 }

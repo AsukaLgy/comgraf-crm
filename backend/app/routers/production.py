@@ -35,8 +35,18 @@ def schedule(case_id: int, data: s.ScheduleInput, user=Depends(current_user), db
 
 
 @router.post('/cases/{case_id}/production/cancel')
-def cancel(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+def cancel(case_id: int, data: s.CancellationInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_response(db, user, service.cancel(db, user, case_id, data))
+
+
+@router.post('/cases/{case_id}/production/cancel/resolve')
+def resolve_cancellation(case_id: int, data: s.CancellationInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_response(db, user, service.resolve_cancellation_request(db, user, case_id, data))
+
+
+@router.post('/cases/{case_id}/production/refunds')
+def refund(case_id: int, data: s.RefundInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_response(db, user, service.refund(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/deliveries')

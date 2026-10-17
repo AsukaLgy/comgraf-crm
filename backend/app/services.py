@@ -2,10 +2,10 @@ import hashlib
 import json
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func
 from .models import Case, Delivery, Event, Idempotency, Item, Ledger, Production, Quote, Task, User, now
 from .security import can, require
-from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance
+from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance, attention_predicates
 from . import schemas as s
 
 NEXT_STAGE = s.NEXT_STAGE
@@ -60,14 +60,9 @@ def take(db, user, case_id, data):
         return case
     if case.owner_id:
         fail('Otro trabajador ya tomó este caso', 409)
-    undelivered_item = select(Item.id).where(
-        Item.case_id == Case.id,
-        func.coalesce(select(func.sum(Delivery.quantity)).where(Delivery.item_id == Item.id).correlate(Item).scalar_subquery(), 0) < Item.quantity,
-    ).correlate(Case).exists()
-    active_production = select(Production.case_id).where(Production.case_id == Case.id, Production.cancelled_at.is_(None), undelivered_item).correlate(Case).exists()
-    has_open_task = select(Task.id).where(Task.case_id == Case.id, Task.done_at.is_(None)).correlate(Case).exists()
-    count = db.scalar(select(func.count()).select_from(Case).where(Case.owner_id == user.id, or_(Case.status == 'Abierto', active_production, has_open_task)))
-    if count >= user.capacity: fail('Alcanzaste tu capacidad de expedientes pendientes', 409)
+    pending = attention_predicates()['pending_assignment']
+    count = db.scalar(select(func.count()).select_from(Case).where(Case.owner_id == user.id, pending))
+    if count >= user.capacity: fail('Alcanzaste tu capacidad de expedientes pendientes (atención, producción, seguimiento o saldo)', 409)
     if case.version != data.version: fail('El caso cambió. Actualiza la bandeja.', 409)
     case.owner_id = user.id
     case.version += 1
@@ -94,10 +89,24 @@ def update_case(db, user, case_id, data):
             fail('Resuelve o reprograma los seguimientos vencidos antes de cerrar atención', 409)
         case.closed_at = now()
         case.pending_message = False
+    elif old == 'Cerrado' and data.status == 'Abierto':
+        case.closed_at = None
     case.status = data.status
     if data.priority is not None: case.priority = data.priority
     if data.next_action is not None: case.next_action = data.next_action
     event(db, case, user, f'Atención: {old} → {data.status}', data={'action': 'attention_status', 'from': old, 'to': data.status, 'origin': 'manual'})
+    return case
+
+
+def update_case_details(db, user, case_id, data):
+    case, changed = mutation(db, user, case_id, data, 'case_details', 'attention')
+    if not changed: return case
+    previous = {'priority': case.priority, 'next_action': case.next_action}
+    if data.priority is not None: case.priority = data.priority
+    if data.next_action is not None: case.next_action = data.next_action
+    event(db, case, user, 'Datos de atención actualizados', data={
+        'action': 'case_details', 'previous': previous,
+        'current': {'priority': case.priority, 'next_action': case.next_action}})
     return case
 
 
@@ -303,12 +312,102 @@ def schedule(db, user, case_id, data):
 
 
 def cancel(db, user, case_id, data):
-    case, changed = mutation(db, user, case_id, data, 'cancel', 'assign')
+    case, changed = mutation(db, user, case_id, data, 'cancel', 'production')
     if not changed: return case
-    production = get_production(db, case)
-    if delivery_status(db, case.id) == 'Completa': fail('No se puede anular una producción completamente entregada')
+    production = db.get(Production, case.id)
+    if not production: fail('No existe una orden de producción')
+    if production.cancelled_at: fail('La producción ya está anulada; usa la acción de resolución económica', 409)
+    if delivery_status(db, case.id) == 'Completa':
+        fail('La orden está completamente entregada; gestiona devolución o reclamo sin anular producción')
+    production.cancelled_stage = production.stage
+    production.cancellation_reason = data.reason
     production.cancelled_at = now()
-    event(db, case, user, f'Trabajo anulado: {data.reason}. Los cobros y entregas se conservan.', data={'action': 'cancelled', 'reason': data.reason})
+    production.cancellation_actor_id = user.id
+    duration = max(0, (production.cancelled_at - production.stage_started_at).total_seconds())
+    can_resolve = can(db, user, 'finance') and can(db, user, 'adjust')
+    if can_resolve and data.treatment is None:
+        fail('Selecciona el tratamiento económico antes de confirmar la anulación')
+    if data.treatment is not None:
+        if not can_resolve: fail('El tratamiento económico requiere permisos financieros y de ajustes', 403)
+        resolve_cancellation(db, user, case, production, data)
+    else:
+        production.cancellation_review_pending = True
+    totals = cancellation_financials(db, case.id)
+    event(db, case, user, f'Trabajo anulado: {data.reason}', data={'action': 'cancelled', 'reason': data.reason,
+        'stage': production.cancelled_stage, 'seconds': duration,
+        'economic_status': 'resolved' if not production.cancellation_review_pending else 'review_pending',
+        'final_amount': str(production.cancellation_final_amount) if production.cancellation_final_amount is not None else None,
+        'adjustment': str(totals.get('adjustment', Decimal('0')))})
+    return case
+
+
+def resolve_cancellation_request(db, user, case_id, data):
+    case, changed = mutation(db, user, case_id, data, 'cancel_resolution', 'adjust')
+    if not changed: return case
+    require(db, user, 'finance')
+    production = db.get(Production, case.id)
+    if not production or not production.cancelled_at or not production.cancellation_review_pending:
+        fail('Este expediente no tiene una resolución económica de anulación pendiente', 409)
+    if delivery_status(db, case.id) == 'Completa':
+        fail('La orden está completamente entregada; registra una devolución o reclamo por separado', 409)
+    resolve_cancellation(db, user, case, production, data)
+    return case
+
+
+def cancellation_financials(db, case_id):
+    entries = list(db.scalars(select(Ledger).where(Ledger.case_id == case_id).order_by(Ledger.id)))
+    charges = sum((e.amount for e in entries if e.kind in ('Obligación', 'Ajuste', 'Ajuste de anulación')), Decimal('0'))
+    received = -sum((e.amount for e in entries if e.kind in ('Anticipo', 'Abono', 'Reversión de pago')), Decimal('0'))
+    refunded = sum((e.amount for e in entries if e.kind == 'Devolución'), Decimal('0'))
+    return {'charges': charges, 'payments_received': received, 'refunds_paid': refunded,
+        'net_received': received - refunded,
+        'current_balance': sum((e.amount for e in entries), Decimal('0'))}
+
+
+def resolve_cancellation(db, user, case, production, data):
+    require(db, user, 'finance')
+    require(db, user, 'adjust')
+    if production.currency != CURRENCY_HNL:
+        fail('La orden histórica está en USD; requiere revisión manual de moneda y no puede ajustarse en HNL', 409)
+    if data.treatment is None: fail('Selecciona el tratamiento económico de la anulación')
+    final_amount = Decimal('0.00') if data.treatment == 'SIN_CARGO' else data.final_amount
+    if final_amount is None: fail('Indica el importe final acordado')
+    totals = cancellation_financials(db, case.id)
+    adjustment = (final_amount - totals['charges']).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    if adjustment:
+        db.add(Ledger(case_id=case.id, kind='Ajuste de anulación', amount=adjustment,
+            currency=production.currency, due_date=None, reference='Resolución de anulación comercial',
+            reason=data.reason, actor_id=user.id))
+    production.cancellation_final_amount = final_amount
+    production.cancellation_review_pending = False
+    production.cancellation_resolved_at = now()
+    production.cancellation_reason = production.cancellation_reason or data.reason
+    production.cancellation_actor_id = user.id
+    resulting_balance = totals['current_balance'] + adjustment
+    event(db, case, user, f'Anulación resuelta: cargo final {final_amount} HNL; ajuste {adjustment} HNL', data={
+        'action': 'cancellation_resolved', 'reason': data.reason, 'treatment': data.treatment,
+        'final_amount': str(final_amount), 'previous_charges': str(totals['charges']),
+        'net_payments_received': str(totals['net_received']), 'adjustment': str(adjustment),
+        'resulting_balance': str(resulting_balance), 'actor_id': user.id,
+        'resolved_at': now().isoformat() + 'Z'})
+
+
+def refund(db, user, case_id, data):
+    case, changed = mutation(db, user, case_id, data, 'refund', 'finance')
+    if not changed: return case
+    production = db.get(Production, case.id)
+    if not production:
+        fail('No existe una orden de producción')
+    is_resolved_cancellation = production.cancelled_at and not production.cancellation_review_pending and production.cancellation_final_amount is not None
+    if not is_resolved_cancellation and delivery_status(db, case.id) != 'Completa':
+        fail('La devolución requiere una anulación resuelta o una entrega completa')
+    if production.currency != CURRENCY_HNL: fail('La orden histórica requiere revisión manual de moneda', 409)
+    due = max(Decimal('0'), -Decimal(balance(db, case.id)['balance']))
+    if data.amount > due: fail('La devolución supera el saldo a favor pendiente')
+    db.add(Ledger(case_id=case.id, kind='Devolución', amount=data.amount, currency=production.currency,
+        reference=data.reference, reason='Devolución realizada y confirmada por el usuario', actor_id=user.id))
+    event(db, case, user, f'Devolución registrada: {data.amount} {production.currency}. {data.reference}',
+        data={'action': 'refund', 'amount': str(data.amount), 'reference': data.reference, 'actor_id': user.id})
     return case
 
 

@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Money = Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)]
 Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
@@ -100,6 +100,17 @@ class CaseUpdate(Mutation):
     next_action: str | None = Field(default=None, max_length=500)
 
 
+class CaseDetailsInput(Mutation):
+    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente'] | None = None
+    next_action: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode='after')
+    def has_change(self):
+        if self.priority is None and self.next_action is None:
+            raise ValueError('Indica prioridad o próxima acción')
+        return self
+
+
 class TaskReschedule(Mutation):
     due_at: datetime
 
@@ -185,6 +196,27 @@ class StageInput(Mutation):
 # ---- Producción, entregas y movimientos financieros ----
 class ReasonInput(Mutation):
     reason: str = Field(min_length=3, max_length=3000)
+
+
+class CancellationInput(Mutation):
+    reason: str = Field(min_length=3, max_length=3000)
+    treatment: Literal['SIN_CARGO', 'IMPORTE_FINAL'] | None = None
+    final_amount: Money | None = None
+
+    @model_validator(mode='after')
+    def cancellation_choice(self):
+        if self.treatment == 'IMPORTE_FINAL' and self.final_amount is None:
+            raise ValueError('Indica el importe final acordado')
+        if self.treatment == 'SIN_CARGO' and self.final_amount not in (None, Decimal('0')):
+            raise ValueError('Sin cargo fija el importe final en cero')
+        if self.treatment is None and self.final_amount is not None:
+            raise ValueError('El importe requiere un tratamiento económico')
+        return self
+
+
+class RefundInput(Mutation):
+    amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)]
+    reference: str = Field(min_length=1, max_length=240)
 
 
 class ScheduleInput(Mutation):
