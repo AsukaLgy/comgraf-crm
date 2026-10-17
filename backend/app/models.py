@@ -76,6 +76,7 @@ class Case(Base):
     kind = Column(String(30), nullable=False, default='Consulta')
     channel = Column(String(30), nullable=False, default='Presencial')
     owner_id = Column(ForeignKey('users.id'), index=True)
+    # Legacy area-specific owner retained for historical visibility; new work uses owner_id only.
     collection_owner_id = Column(ForeignKey('users.id'))
     priority = Column(String(20), nullable=False, default='Normal')
     status = Column(String(40), nullable=False, default='Nuevo', index=True)
@@ -134,6 +135,7 @@ class Production(Base):
     __tablename__ = 'productions'
     case_id = Column(ForeignKey('cases.id'), primary_key=True)
     quote_id = Column(ForeignKey('quotes.id'), unique=True)
+    # Legacy assignment column; current ownership is the case's principal owner.
     owner_id = Column(ForeignKey('users.id'))
     stage = Column(String(40), nullable=False, default='Preparación', index=True)
     stage_started_at = Column(DateTime, nullable=False, default=now)
@@ -151,6 +153,8 @@ class Production(Base):
     payment_due_date = Column(Date, nullable=False)
     delivery_method = Column(String(120), nullable=False)
     instructions = Column(Text, nullable=False, default='')
+    specs_snapshot = Column(JSON)
+    # Legacy approval workflow fields. Keep historical values; no new approval state is collected.
     art_version = Column(String(100), nullable=False, default='')
     approval_evidence = Column(Text)
     approved_snapshot = Column(JSON)
@@ -167,7 +171,8 @@ class Item(Base):
     unit = Column(String(30), nullable=False)
     unit_price = Column(Numeric(14, 2), nullable=False)
     specs = Column(JSON, nullable=False)
-    substage = Column(String(40), nullable=False, default='Diseño')
+    # Legacy value only. The active workflow uses Production.stage for the whole case.
+    substage = Column(String(40), nullable=False, default='')
 
 
 class Attachment(Base):

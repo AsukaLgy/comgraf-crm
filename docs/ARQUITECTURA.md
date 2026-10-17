@@ -25,21 +25,19 @@ Operaciones críticas bloquean el caso con `SELECT ... FOR UPDATE`, comprueban v
 
 Se usa aislamiento READ COMMITTED para que la segunda transacción vea el resultado confirmado de la primera. Errores 409 conservan el formulario, actualizan el expediente y permiten revisar antes de guardar. No hay actualizaciones financieras destructivas: un pago se corrige mediante una reversión enlazada, única y con motivo.
 
-## Especificaciones y autorización
+## Cotizaciones y producción
 
-Cotizaciones son versiones inmutables de partidas y precios; la aceptación o rechazo registra evidencia. Una conversión aceptada reutiliza las partidas de esa versión. Sin cotización puede convertirse con una partida y condición de cobro, dejando dimensiones y arte pendientes.
+Las cotizaciones guardan versiones inmutables en HNL y registran la decisión de cada versión. Una cotización histórica en USD permanece en USD y debe revisarse en una nueva versión HNL antes de convertirla; nunca se calcula una tasa implícita.
 
-Para programar: responsable activo, inicio programado y fecha comprometida. Para autorizar ejecución: material y medidas aplicables, copias/numeración o encuadernación/hojas según producto, arte adjunto con versión, evidencia del cliente y anticipo cumplido. La aprobación guarda una instantánea de partidas, hashes de archivos y evidencia. Solo entonces se permite entrar a En producción. Las subetapas de impresión también requieren autorización.
-
-No se editan silenciosamente especificaciones aprobadas. Cambios de alcance posteriores se gestionan con un caso relacionado; esta versión no ofrece un flujo de enmiendas de producción aprobada.
+Generar una orden amplía el mismo expediente y la deja activa en Preparación. No hay autorización posterior ni requisitos de arte aprobado, anticipo o responsable de taller para avanzar. Se guarda una instantánea inicial de partidas en specs_snapshot; adjuntos y evidencia explícita siguen disponibles sin representar una aprobación ficticia. La producción usa solo etapas principales, validación secuencial, bloqueos y motivos para retroceder. Programar registra fechas anteriores y nuevas, usuario y hora sin exigir un motivo. Se conserva el compromiso original. Las columnas antiguas de autorización, subetapas y responsables por área se mantienen sin comportamiento activo para proteger expedientes existentes; no se eliminan datos históricos.
 
 ## Dinero y tiempo
 
-Importes DECIMAL(14,2), cantidades DECIMAL(14,3); dimensiones decimales serializadas como cadenas en JSON validado. Total = suma de cantidad × precio unitario, redondeo decimal HALF_UP al total. Moneda HNL o USD por orden; no hay conversión de divisas ni mezcla de monedas en KPI.
+Importes DECIMAL(14,2), cantidades DECIMAL(14,3); dimensiones decimales serializadas como cadenas en JSON validado. Total = suma de cantidad × precio unitario, redondeo decimal HALF_UP al total. Las operaciones nuevas usan exclusivamente HNL, incluidas cotizaciones, producción y movimientos financieros. Los registros históricos USD conservan su moneda y no admiten nuevos pagos o ajustes HNL; los pagos históricos no se convierten ni se alteran. No hay conversión de divisas ni mezcla de monedas en KPI.
 
 Saldo = suma de movimientos con signo: obligación y reversión de pago positivos; anticipos/abonos negativos; ajustes firmados. Saldo vencido: cargos cuyo vencimiento es anterior al día local menos créditos disponibles, imputados primero a deuda vencida, limitado entre cero y saldo. Una reversión mantiene el vencimiento original. No hay interés, impuestos fiscales ni asientos contables.
 
-Instantes UTC en MySQL; presentación y límites de día en `APP_TIMEZONE` (America/Tegucigalpa). Fechas solicitadas, compromisos y vencimientos son fechas de calendario. Las revisiones de programación guardan fecha anterior, nueva, motivo y autor. Se conserva el compromiso original para medir puntualidad.
+Instantes UTC en MySQL; presentación y límites de día en `APP_TIMEZONE` (America/Tegucigalpa). Fechas solicitadas, compromisos y vencimientos son fechas de calendario. Las revisiones de programación guardan fecha anterior y nueva, usuario y hora. Se conserva el compromiso original para medir puntualidad.
 
 ## Acceso
 
@@ -48,7 +46,7 @@ Instantes UTC en MySQL; presentación y límites de día en `APP_TIMEZONE` (Amer
 | Administrador | Todo | Todo, usuarios y roles |
 | Coordinador | Todo | Asignación, reapertura, atención, taller, cobros, ajustes |
 | Atención | Todos los casos y clientes, importes comerciales | Clientes; tomar; atender/cotizar/convertir sus casos |
-| Producción | Casos en producción | Programación, aprobación, etapas, archivos, entregas; sin saldos, precios ni eventos financieros |
+| Producción | Casos en producción | Programación, etapas principales, archivos y entregas; sin saldos, precios ni eventos financieros |
 | Cobranza | Casos en producción e importes | Anticipos, abonos e indicadores; sin ajustes ni producción |
 
 Las capacidades de roles salvo Administrador son configurables. Varios roles acumulan permisos. La interfaz oculta acciones según permisos, pero cada endpoint vuelve a autorizarlas. Las asignaciones son responsabilidades operativas, no aislamiento entre empresas.
@@ -57,7 +55,7 @@ Contraseñas Argon2id. Sesiones aleatorias, almacenadas como SHA256, cookie Http
 
 ## Indicadores
 
-La pantalla explica sus denominadores: conversión de casos sobre todos los casos; aceptación sobre versiones; cotizaciones convertidas sobre versiones aceptadas; puntualidad sobre entregas completas contra compromiso original. Tiempo de primera respuesta cuenta primera interacción manual saliente o visita, no nota interna ni asignación. Tiempo por etapa incluye permanencia y bloqueos; tiempo bloqueado también se reporta aparte. Retrabajo cuenta retrocesos con motivo.
+La pantalla explica sus denominadores: conversión de casos sobre todos los casos; aceptación sobre versiones; cotizaciones convertidas sobre versiones aceptadas; puntualidad sobre entregas completas contra compromiso original. Tiempo de primera respuesta cuenta primera interacción manual saliente o visita, no nota interna ni asignación. Tiempo por etapa incluye permanencia y bloqueos; tiempo bloqueado también se reporta aparte. Retrabajo cuenta retrocesos de etapas principales con motivo.
 
 ## Canales futuros
 

@@ -6,6 +6,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import select
 from .db import get_db
 from .models import User, Role, Session, now
+from .config import settings
 
 passwords = PasswordHash.recommended()
 DUMMY_HASH = passwords.hash(secrets.token_urlsafe(24))
@@ -51,4 +52,5 @@ def current_user(request: Request, db=Depends(get_db, scope='function')):
 def user_data(db, user):
     return {'id': user.id, 'username': user.username, 'name': user.name,
             'roles': user.roles, 'active': user.active, 'capacity': user.capacity,
-            'permissions': sorted(permissions(db, user))}
+            'permissions': sorted(permissions(db, user)),
+            'timezone': settings.app_timezone}

@@ -25,7 +25,7 @@ def calendar(user=Depends(current_user), db=Depends(get_db, scope='function')):
             events.append({'id': f't{task.id}', 'case_id': case.id, 'type': 'Seguimiento', 'date': row(task)['due_at'], 'title': f'{label} · {task.title}', 'owner_id': task.owner_id})
         production = db.get(Production, case.id)
         if production and not production.cancelled_at and production.stage != 'Entregado':
-            if production.scheduled_at: events.append({'id': f'p{case.id}', 'case_id': case.id, 'type': 'Producción', 'date': row(production)['scheduled_at'], 'title': label, 'owner_id': production.owner_id})
+            if production.scheduled_at: events.append({'id': f'p{case.id}', 'case_id': case.id, 'type': 'Producción', 'date': row(production)['scheduled_at'], 'title': label, 'owner_id': case.owner_id})
             if production.committed_date: events.append({'id': f'd{case.id}', 'case_id': case.id, 'type': 'Entrega', 'date': str(production.committed_date), 'title': label, 'original': str(production.original_committed_date)})
     return sorted(events, key=lambda e: e['date'])
 
@@ -45,7 +45,7 @@ def indicators(user=Depends(current_user), db=Depends(get_db, scope='function'))
     for e in events:
         if e.data.get('action') == 'stage': stages[e.data['from']] += e.data.get('seconds', 0)
         if e.data.get('action') == 'unblocked': blocked += e.data.get('seconds', 0)
-        if e.data.get('rework'): rework += 1
+        if e.data.get('rework') and e.data.get('action') == 'stage': rework += 1
     financial = defaultdict(lambda: {'delivered_pending': Decimal(0), 'overdue': Decimal(0)})
     completed, ontime = 0, 0
     for case in cases:

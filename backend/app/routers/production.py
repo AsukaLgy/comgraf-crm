@@ -9,64 +9,54 @@ from .. import schemas as s, services as service
 from ..security import current_user, can
 from ..repository import get_case, row
 from ..config import settings
-from .cases import response
+from .common import case_response
 
 router = APIRouter(prefix='/api', tags=['Producción y cobranza'])
 
 
-@router.post('/cases/{case_id}/production/approve')
-def approve(case_id: int, data: s.Approval, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.approve(db, user, case_id, data))
-
-
 @router.post('/cases/{case_id}/production/stage')
 def stage(case_id: int, data: s.StageInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.change_stage(db, user, case_id, data))
+    return case_response(db, user, service.change_stage(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/production/block')
 def block(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.block(db, user, case_id, data))
+    return case_response(db, user, service.block(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/production/unblock')
 def unblock(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.block(db, user, case_id, data, True))
+    return case_response(db, user, service.block(db, user, case_id, data, True))
 
 
 @router.post('/cases/{case_id}/production/schedule')
 def schedule(case_id: int, data: s.ScheduleInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.schedule(db, user, case_id, data))
-
-
-@router.post('/cases/{case_id}/production/items/{item_id}')
-def substage(case_id: int, item_id: int, data: s.SubstageInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.substage(db, user, case_id, item_id, data))
+    return case_response(db, user, service.schedule(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/production/cancel')
 def cancel(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.cancel(db, user, case_id, data))
+    return case_response(db, user, service.cancel(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/deliveries')
 def deliver(case_id: int, data: s.DeliveryInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.deliver(db, user, case_id, data))
+    return case_response(db, user, service.deliver(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/payments')
 def pay(case_id: int, data: s.PaymentInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.pay(db, user, case_id, data))
+    return case_response(db, user, service.pay(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/adjustments')
 def adjust(case_id: int, data: s.AdjustmentInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.adjust(db, user, case_id, data))
+    return case_response(db, user, service.adjust(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/payments/{entry_id}/reverse')
 def reverse(case_id: int, entry_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.reverse_payment(db, user, case_id, entry_id, data))
+    return case_response(db, user, service.reverse_payment(db, user, case_id, entry_id, data))
 
 
 @router.post('/cases/{case_id}/attachments', status_code=201)

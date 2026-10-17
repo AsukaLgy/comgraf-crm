@@ -5,6 +5,7 @@ from ..models import Case, Client, Contact, Draft, SavedView
 from .. import schemas as s, services as service
 from ..security import current_user, require, can
 from ..repository import row, get_case, case_detail, cases_list
+from .common import case_response
 
 router = APIRouter(prefix='/api', tags=['Expedientes'])
 
@@ -34,7 +35,7 @@ def create(data: s.CaseInput, user=Depends(current_user), db=Depends(get_db, sco
     db.add(case)
     db.flush()
     service.event(db, case, user, f'Caso de {case.kind.lower()} creado por {case.channel}', data={'action': 'created'})
-    return case_detail(db, user, case)
+    return case_response(db, user, case)
 
 
 @router.get('/cases/{case_id}')
@@ -42,54 +43,49 @@ def detail(case_id: int, user=Depends(current_user), db=Depends(get_db, scope='f
     return case_detail(db, user, get_case(db, user, case_id))
 
 
-def response(db, user, case):
-    db.flush()
-    return case_detail(db, user, case)
-
-
 @router.post('/cases/{case_id}/take')
 def take(case_id: int, data: s.Mutation, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.take(db, user, case_id, data))
+    return case_response(db, user, service.take(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/assign')
 def assign(case_id: int, data: s.Assignment, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.assign(db, user, case_id, data))
+    return case_response(db, user, service.assign(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/attention')
 def attention(case_id: int, data: s.CaseUpdate, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.update_case(db, user, case_id, data))
+    return case_response(db, user, service.update_case(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/events')
 def events(case_id: int, data: s.EventInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.add_event(db, user, case_id, data))
+    return case_response(db, user, service.add_event(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/tasks')
 def tasks(case_id: int, data: s.TaskInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.add_task(db, user, case_id, data))
+    return case_response(db, user, service.add_task(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/tasks/{task_id}/complete')
 def complete(case_id: int, task_id: int, data: s.Mutation, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.complete_task(db, user, case_id, task_id, data))
+    return case_response(db, user, service.complete_task(db, user, case_id, task_id, data))
 
 
 @router.post('/cases/{case_id}/quotes')
 def quote(case_id: int, data: s.QuoteInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.add_quote(db, user, case_id, data))
+    return case_response(db, user, service.add_quote(db, user, case_id, data))
 
 
 @router.post('/cases/{case_id}/quotes/{quote_id}/decision')
 def decision(case_id: int, quote_id: int, data: s.QuoteDecision, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.decide_quote(db, user, case_id, quote_id, data))
+    return case_response(db, user, service.decide_quote(db, user, case_id, quote_id, data))
 
 
 @router.post('/cases/{case_id}/convert')
 def convert(case_id: int, data: s.Conversion, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return response(db, user, service.convert(db, user, case_id, data))
+    return case_response(db, user, service.convert(db, user, case_id, data))
 
 
 @router.get('/views')

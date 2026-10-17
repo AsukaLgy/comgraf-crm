@@ -1,14 +1,17 @@
 import hashlib
 import json
 from decimal import Decimal, ROUND_HALF_UP
+from typing import get_args
 from fastapi import HTTPException
 from sqlalchemy import select, func
-from .models import *
+from .models import Case, Delivery, Event, Idempotency, Item, Ledger, Production, Quote, Task, User, now
 from .security import can, require
-from .repository import get_case, today, row, balance, delivery_status, local_day, quantity_text
+from .repository import get_case, today, row, delivery_status, local_day, quantity_text
+from .schemas import Stage
 
-STAGES = ['Preparación', 'Programado', 'En producción', 'Calidad', 'Listo para entregar', 'Entregado']
-SUBSTAGES = ['Diseño', 'Preprensa', 'Impresión', 'Acabados', 'Finalizado']
+# Keep workflow ordering derived from the server-validated stage values.
+STAGES = get_args(Stage)
+CURRENCY_HNL = 'HNL'
 
 
 def fail(message, code=422):
@@ -20,6 +23,7 @@ def event(db, case, user, body, kind='Sistema', channel='Sistema', data=None):
     case.updated_at = now()
 
 
+# ---- Concurrencia, idempotencia y asignación principal ----
 def mutation(db, user, case_id, data, action, permission):
     require(db, user, permission)
     case = get_case(db, user, case_id, lock=True)
@@ -36,7 +40,6 @@ def mutation(db, user, case_id, data, action, permission):
         fail('El expediente cambió. Actualiza los datos y revisa el formulario antes de reintentar.', 409)
     db.add(Idempotency(case_id=case_id, key=data.key, request_hash=signature, action=action, actor_id=user.id))
     case.version += 1
-    case.updated_at = now()
     return case, True
 
 
@@ -45,7 +48,7 @@ def active_user(db, user_id, role_permission=None):
     if not user or not user.active:
         fail('Selecciona un trabajador activo')
     if role_permission and not can(db, user, role_permission):
-        fail('El trabajador no tiene permisos para esa responsabilidad')
+        fail('El trabajador no tiene el permiso requerido para esta asignación')
     return user
 
 
@@ -71,14 +74,10 @@ def take(db, user, case_id, data):
 def assign(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'assign', 'assign')
     if not changed: return case
-    permissions = {'atencion': 'attention', 'produccion': 'production', 'cobranza': 'finance'}
-    if data.owner_id: active_user(db, data.owner_id, permissions[data.responsibility])
-    if data.responsibility == 'produccion':
-        production = get_production(db, case)
-        production.owner_id = data.owner_id
-    else:
-        setattr(case, 'owner_id' if data.responsibility == 'atencion' else 'collection_owner_id', data.owner_id)
-    event(db, case, user, f'Asignación de {data.responsibility}', data={'owner_id': data.owner_id})
+    if data.owner_id: active_user(db, data.owner_id, 'attention')
+    previous = case.owner_id
+    case.owner_id = data.owner_id
+    event(db, case, user, 'Responsable principal del expediente actualizado', data={'action': 'assigned', 'previous_owner_id': previous, 'owner_id': data.owner_id})
     return case
 
 
@@ -103,6 +102,7 @@ def update_case(db, user, case_id, data):
     return case
 
 
+# ---- Actividad y seguimientos de atención ----
 def add_event(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'event', 'attention')
     if not changed: return case
@@ -147,13 +147,14 @@ def total(items):
     return amount
 
 
+# ---- Cotizaciones y ampliación del expediente a producción ----
 def add_quote(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'quote', 'attention')
     if not changed: return case
     if data.valid_until < today(): fail('La vigencia ya terminó')
     items = [i.model_dump(mode='json') for i in data.items]
     version = (db.scalar(select(func.max(Quote.version)).where(Quote.case_id == case.id)) or 0) + 1
-    db.add(Quote(case_id=case.id, version=version, items=items, total=total(items), currency=data.currency, valid_until=data.valid_until))
+    db.add(Quote(case_id=case.id, version=version, items=items, total=total(items), currency=CURRENCY_HNL, valid_until=data.valid_until))
     event(db, case, user, f'Cotización v{version} preparada', data={'financial': True})
     return case
 
@@ -175,29 +176,30 @@ def convert(db, user, case_id, data):
     if not changed: return case
     if case.mode == 'Producción': fail('El expediente ya está en producción', 409)
     if case.status == 'Cerrado': fail('Reabre la atención antes de convertir')
-    if data.owner_id: active_user(db, data.owner_id, 'production')
     items = [i.model_dump(mode='json') for i in data.items]
-    currency = data.currency
     if data.quote_id:
         quote = db.get(Quote, data.quote_id)
         if not quote or quote.case_id != case.id or quote.status != 'Aceptada': fail('Selecciona una cotización aceptada de este caso')
-        items, currency = quote.items, quote.currency
+        if quote.currency != CURRENCY_HNL: fail('Esta cotización histórica está en USD. Revísala y crea una nueva versión en HNL antes de generar producción.', 409)
+        items = quote.items
     if not items: fail('Agrega al menos un producto')
     price = total(items)
     if data.advance_required > price: fail('El anticipo no puede superar el precio')
-    production = Production(case_id=case.id, quote_id=data.quote_id, owner_id=data.owner_id,
+    production = Production(case_id=case.id, quote_id=data.quote_id,
         requested_date=data.requested_date, original_committed_date=data.committed_date,
-        committed_date=data.committed_date, price=price, currency=currency,
+        committed_date=data.committed_date, price=price, currency=CURRENCY_HNL,
         payment_terms=data.payment_terms, advance_required=data.advance_required,
         payment_due_date=data.payment_due_date, delivery_method=data.delivery_method, instructions=data.instructions)
     db.add(production)
     db.flush()
-    for item in items:
-        db.add(Item(case_id=case.id, **item))
-    db.add(Ledger(case_id=case.id, kind='Obligación', amount=price, currency=currency,
+    order_items = [Item(case_id=case.id, **item) for item in items]
+    db.add_all(order_items)
+    db.flush()
+    production.specs_snapshot = {'items': [row(item, ('substage',)) for item in order_items]}
+    db.add(Ledger(case_id=case.id, kind='Obligación', amount=price, currency=CURRENCY_HNL,
         due_date=data.payment_due_date, reference='Orden de producción', actor_id=user.id))
     case.mode = 'Producción'
-    event(db, case, user, 'Expediente ampliado a Producción · Preparación. Fabricación aún no autorizada.', data={'action': 'converted', 'quote_id': data.quote_id})
+    event(db, case, user, f'Orden de producción generada por {user.name} · Preparación', data={'action': 'converted', 'quote_id': data.quote_id, 'currency': CURRENCY_HNL})
     return case
 
 
@@ -208,36 +210,7 @@ def get_production(db, case):
     return production
 
 
-def approve(db, user, case_id, data):
-    case, changed = mutation(db, user, case_id, data, 'approve', 'production')
-    if not changed: return case
-    production = get_production(db, case)
-    if production.authorized_at: fail('La ejecución ya fue autorizada', 409)
-    if not production.owner_id or not production.committed_date or not production.scheduled_at:
-        fail('Falta responsable, fecha comprometida o programación')
-    active_user(db, production.owner_id, 'production')
-    files = list(db.scalars(select(Attachment).where(Attachment.case_id == case.id, Attachment.art_version == data.art_version)))
-    if not files: fail('Adjunta el arte con la misma versión antes de aprobarlo')
-    items = list(db.scalars(select(Item).where(Item.case_id == case.id)))
-    for item in items:
-        specs = item.specs
-        if item.product == 'Otros trabajos':
-            if not specs.get('detail'): fail('Completa las especificaciones de otros trabajos')
-        elif not specs.get('material') or not specs.get('width') or not specs.get('height'):
-            fail(f'Completa material y dimensiones de {item.product}')
-        if item.product == 'Talonarios y facturas' and (specs.get('copies') is None or not specs.get('numbering')):
-            fail('Los talonarios requieren copias y numeración')
-        if item.product == 'Libretas y cuadernos' and (not specs.get('binding') or not specs.get('sheets')):
-            fail('Las libretas requieren hojas y encuadernación')
-    paid = -sum((e.amount for e in db.scalars(select(Ledger).where(Ledger.case_id == case.id, Ledger.kind.in_(['Anticipo', 'Abono', 'Reversión de pago'])))), Decimal('0'))
-    if paid < production.advance_required: fail('Falta registrar el anticipo requerido')
-    production.art_version, production.approval_evidence = data.art_version, data.evidence
-    production.approved_snapshot = {'items': [row(i) for i in items], 'files': [{'id': f.id, 'name': f.name, 'sha256': f.sha256} for f in files], 'evidence': data.evidence, 'art_version': data.art_version}
-    production.authorized_at = now()
-    event(db, case, user, f'Ejecución autorizada. Arte {data.art_version}: {data.evidence}', data={'action': 'authorized'})
-    return case
-
-
+# ---- Ciclo de producción: etapas, bloqueos y programación ----
 def change_stage(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'stage', 'production')
     if not changed: return case
@@ -249,9 +222,8 @@ def change_stage(db, user, case_id, data):
     if target > source + 1: fail('No se pueden saltar etapas')
     if target < source and not data.reason: fail('El retroceso requiere motivo')
     if old == 'Entregado': fail('Un trabajo entregado no puede retroceder; abre un caso relacionado de retrabajo')
-    if target == 1 and (not production.owner_id or not production.scheduled_at or not production.committed_date):
-        fail('Define responsable, programación y compromiso de entrega')
-    if target >= 2 and not production.authorized_at: fail('Autoriza la ejecución antes de fabricar')
+    if target == 1 and (not production.scheduled_at or not production.committed_date):
+        fail('Define inicio programado y fecha comprometida antes de avanzar')
     if data.stage == 'Entregado': fail('La etapa Entregado se establece al completar las entregas')
     if target < source and delivery_status(db, case.id) != 'Pendiente': fail('Ya existen entregas; registra el retrabajo en un caso relacionado')
     duration = (now() - production.stage_started_at).total_seconds()
@@ -282,26 +254,10 @@ def schedule(db, user, case_id, data):
     if not changed: return case
     production = get_production(db, case)
     if production.stage == 'Entregado': fail('El trabajo ya fue entregado')
-    previous = production.committed_date
+    previous_scheduled, previous_committed = production.scheduled_at, production.committed_date
     if not production.original_committed_date: production.original_committed_date = data.committed_date
     production.committed_date, production.scheduled_at = data.committed_date, data.scheduled_at
-    event(db, case, user, f'Programación revisada: {data.reason}', data={'action': 'schedule', 'previous': str(previous) if previous else None, 'committed_date': str(data.committed_date), 'scheduled_at': data.scheduled_at.isoformat() + 'Z'})
-    return case
-
-
-def substage(db, user, case_id, item_id, data):
-    case, changed = mutation(db, user, case_id, data, f'substage:{item_id}', 'production')
-    if not changed: return case
-    production = get_production(db, case)
-    item = db.get(Item, item_id)
-    if not item or item.case_id != case.id: fail('Partida no encontrada', 404)
-    if production.blocked_since or production.stage == 'Entregado': fail('No se puede modificar la subetapa en este estado')
-    old, new = SUBSTAGES.index(item.substage), SUBSTAGES.index(data.substage)
-    if new < old and not data.reason: fail('El retrabajo requiere motivo')
-    if new > old + 1: fail('No se pueden saltar subetapas')
-    if new >= 2 and (not production.authorized_at or STAGES.index(production.stage) < 2): fail('La impresión requiere ejecución autorizada y etapa En producción')
-    event(db, case, user, f'{item.product}: {item.substage} → {data.substage}. {data.reason}', data={'action': 'substage', 'item_id': item.id, 'from': item.substage, 'to': data.substage, 'rework': new < old})
-    item.substage = data.substage
+    event(db, case, user, 'Programación y compromiso actualizados', data={'action': 'schedule', 'previous': {'scheduled_at': previous_scheduled.isoformat() + 'Z' if previous_scheduled else None, 'committed_date': str(previous_committed) if previous_committed else None}, 'current': {'scheduled_at': data.scheduled_at.isoformat() + 'Z', 'committed_date': str(data.committed_date)}})
     return case
 
 
@@ -315,6 +271,7 @@ def cancel(db, user, case_id, data):
     return case
 
 
+# ---- Entregas y control operativo de cobros ----
 def deliver(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'delivery', 'production')
     if not changed: return case
@@ -340,6 +297,7 @@ def pay(db, user, case_id, data):
     if not changed: return case
     production = db.get(Production, case.id)
     if not production: fail('Registra primero la orden y su obligación')
+    if production.currency != CURRENCY_HNL: fail('Esta orden histórica está en USD. No registres el abono como lempiras; requiere revisión explícita de moneda.', 409)
     db.add(Ledger(case_id=case.id, kind=data.kind, amount=-data.amount, currency=production.currency, reference=data.reference, actor_id=user.id))
     event(db, case, user, f'{data.kind}: {data.amount} {production.currency}. {data.reference}', data={'financial': True, 'action': 'payment'})
     return case
@@ -350,6 +308,7 @@ def adjust(db, user, case_id, data):
     if not changed: return case
     production = db.get(Production, case.id)
     if not production or not data.amount: fail('El ajuste requiere una producción y un importe distinto de cero')
+    if production.currency != CURRENCY_HNL: fail('Esta orden histórica está en USD y requiere revisión explícita de moneda.', 409)
     db.add(Ledger(case_id=case.id, kind='Ajuste', amount=data.amount, currency=production.currency, due_date=data.due_date, reference='Ajuste autorizado', reason=data.reason, actor_id=user.id))
     event(db, case, user, f'Ajuste: {data.amount} {production.currency}. {data.reason}', data={'financial': True})
     return case

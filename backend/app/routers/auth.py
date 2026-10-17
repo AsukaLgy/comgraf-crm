@@ -44,7 +44,7 @@ def logout(request: Request, response: Response, user=Depends(current_user), db=
 
 @router.get('/auth/me')
 def me(user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return {**user_data(db, user), 'timezone': settings.app_timezone}
+    return user_data(db, user)
 
 
 @router.get('/users')

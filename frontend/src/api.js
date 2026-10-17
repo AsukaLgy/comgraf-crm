@@ -1,3 +1,5 @@
+import {HNL_CURRENCY} from './domain'
+
 export async function api(path, options = {}) {
   const {body, ...rest} = options
   let response
@@ -11,7 +13,7 @@ export async function api(path, options = {}) {
   return data
 }
 export const can = (user, permission) => user?.permissions?.some(p => p === '*' || p === permission)
-export const money = (v, currency = 'HNL') => new Intl.NumberFormat('es-HN', {style:'currency',currency}).format(Number(v || 0))
+export const money = (v, currency = HNL_CURRENCY) => new Intl.NumberFormat('es-HN', {style:'currency',currency}).format(Number(v || 0))
 export const quantity = v => new Intl.NumberFormat('es-HN', {maximumFractionDigits:3}).format(Number(v||0))
 export let timezone = 'America/Tegucigalpa'
 export const setTimezone = value => { timezone = value }

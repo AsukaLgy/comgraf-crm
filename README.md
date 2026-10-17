@@ -91,8 +91,8 @@ Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vit
 1. Crear cliente provisional (basta un nombre); agregar contactos y datos comerciales cuando se conozcan.
 2. Crear caso y tomarlo desde el pool. Registrar notas, visitas, llamadas o conversaciones externas; programar seguimientos. Una consulta se cierra con motivo y resumen sin generar producción.
 3. Preparar cotización con partidas y vigencia. Registrar aceptación/rechazo de una versión. Generar orden reutiliza esa versión y conserva el expediente.
-4. La conversión queda en Preparación. Programar y asignar taller; completar especificaciones y adjuntar arte versionado. Registrar anticipo si se exige. Autorizar ejecución con evidencia del cliente.
-5. Avanzar secuencialmente por producción y calidad; bloqueos y retrocesos requieren motivo. Acceder a Ficha de taller para imprimir o guardar PDF.
+4. Generar orden activa el mismo expediente en Preparación. Capturar partidas, precios en HNL, fechas, condición Contado o Crédito y entrega; la orden puede avanzar sin autorización separada.
+5. Programar el inicio y compromiso de entrega; el evento conserva fechas anteriores y nuevas, usuario y hora. Avanzar solo por las etapas principales; bloqueos y retrocesos requieren motivo. Acceder a Ficha de taller para imprimir o guardar PDF.
 6. Registrar cantidades entregadas por partida y evidencia. Una entrega parcial conserva pendientes; solo la entrega completa marca Entregado.
 7. Registrar anticipos/abonos; corregir mediante reversión o ajuste autorizado. Cerrar atención no elimina el saldo ni oculta el caso de cobranza.
 
@@ -168,9 +168,12 @@ Linux: sustituir rutas de `.venv\Scripts\python.exe` por `.venv/bin/python` y us
 ## Documentación y límites
 
 - [Arquitectura, permisos, cálculos y denominadores](docs/ARQUITECTURA.md).
+- [Mapa del código, invariantes y guía de intervención](docs/MANTENIMIENTO.md).
 - [Referencias inspeccionadas y procedencia](docs/REFERENCIAS.md).
 - [Verificación y limitaciones reales](docs/VERIFICACION.md).
 
 Control operativo de cobros; no reemplaza contabilidad ni un sistema fiscal. No integra correo/WhatsApp. No implementa SaaS, multitenencia ni API pública. No se ha publicado en Internet.
-#   c o m g r a f - c r m  
- 
+
+Las migraciones se aplican en orden con `alembic upgrade head`; la migración 002 normaliza únicamente equivalencias inequívocas de Contado/Crédito y agrega la instantánea de especificaciones. No altera importes, saldos, pagos ni fechas históricas.
+
+Las nuevas operaciones se registran en HNL. Los importes históricos en USD se conservan, sin conversión automática; una cotización antigua en USD debe revisarse con precios HNL antes de generar una orden.

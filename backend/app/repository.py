@@ -5,11 +5,12 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from sqlalchemy import select, or_, func
-from .models import *
+from .models import Attachment, Case, Client, Delivery, Draft, Event, Item, Ledger, Production, Quote, Task, User, now
 from .security import can
 from .config import settings
 
 
+# ---- Normalización, fechas y serialización HTTP ----
 def normalize(value):
     return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKD', str(value)).encode('ascii', 'ignore').decode().lower())
 
@@ -50,6 +51,7 @@ def visibility(db, user):
     return False
 
 
+# ---- Proyecciones del expediente ----
 def get_case(db, user, case_id, lock=False):
     query = select(Case).where(Case.id == case_id, visibility(db, user))
     if lock:
@@ -63,7 +65,7 @@ def get_case(db, user, case_id, lock=False):
 def balance(db, case_id):
     entries = list(db.scalars(select(Ledger).where(Ledger.case_id == case_id).order_by(Ledger.id)))
     total = sum((entry.amount for entry in entries), Decimal('0'))
-    # Imputación FIFO de créditos a obligaciones vencidas. Reversiones conservan vencimiento.
+    # Los créditos se imputan primero al saldo vencido; se conserva el saldo neto total.
     overdue_charges = sum((e.amount for e in entries if e.amount > 0 and e.due_date and e.due_date < today()), Decimal('0'))
     credits = -sum((e.amount for e in entries if e.amount < 0), Decimal('0'))
     overdue = max(Decimal('0'), min(total, overdue_charges - credits))
@@ -79,6 +81,7 @@ def delivery_status(db, case_id):
     return 'Parcial' if quantities else 'Pendiente'
 
 
+# ---- Resúmenes y bandejas ----
 def case_summary(db, user, case):
     result = row(case)
     result['number'] = f'CG-{case.id:06d}'
@@ -93,10 +96,11 @@ def case_summary(db, user, case):
     elif production:
         for key in ('price', 'advance_required', 'payment_terms', 'payment_due_date'):
             result['production'].pop(key, None)
-        if result['production']['approved_snapshot']:
-            snap = dict(result['production']['approved_snapshot'])
-            snap['items'] = [{k: v for k, v in i.items() if k != 'unit_price'} for i in snap['items']]
-            result['production']['approved_snapshot'] = snap
+        for snapshot_name in ('approved_snapshot', 'specs_snapshot'):
+            if result['production'][snapshot_name]:
+                snap = dict(result['production'][snapshot_name])
+                snap['items'] = [{k: v for k, v in i.items() if k != 'unit_price'} for i in snap['items']]
+                result['production'][snapshot_name] = snap
     return result
 
 
@@ -106,6 +110,8 @@ def case_detail(db, user, case):
     for name, model in [('events', Event), ('tasks', Task), ('items', Item), ('attachments', Attachment), ('deliveries', Delivery)]:
         objects = db.scalars(select(model).where(model.case_id == case.id).order_by(model.id))
         result[name] = [row(o, ('storage_key',) if model == Attachment else ('unit_price',) if model == Item and not commercial else ()) for o in objects]
+        if model == Item:
+            for item in result[name]: item.pop('substage', None)
     if not commercial:
         result['events'] = [e for e in result['events'] if not e['data'].get('financial')]
     result['quotes'] = [row(q) for q in db.scalars(select(Quote).where(Quote.case_id == case.id).order_by(Quote.version))] if commercial else []

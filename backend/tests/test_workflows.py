@@ -4,7 +4,8 @@ from decimal import Decimal
 import uuid
 from sqlalchemy import select
 from app.db import engine, SessionLocal
-from app.models import Case, Production, Ledger, Item
+from app.config import settings
+from app.models import Case, Production, Ledger, Item, Quote
 from app.repository import today
 
 
@@ -31,7 +32,7 @@ def item():
 
 
 def conversion(owner=None):
-    return {'items':[item()],'owner_id':owner,'committed_date':str(today()+timedelta(days=3)), 'payment_due_date':str(today()-timedelta(days=1)), 'delivery_method':'Retiro en taller','advance_required':'100.00'}
+    return {'items':[item()],'committed_date':str(today()+timedelta(days=3)), 'payment_due_date':str(today()-timedelta(days=1)), 'delivery_method':'Retiro en taller','advance_required':'100.00','payment_terms':'Contado'}
 
 
 def test_attention_history_search_and_drafts(clients):
@@ -61,6 +62,51 @@ def test_attention_history_search_and_drafts(clients):
     assert must(api.get(f'/api/cases/{original}'))['status']=='Cerrado'
 
 
+def test_client_contact_relations_and_new_hnl_contract(clients):
+    api=clients['admin']
+    customer,c=create(api,'Validar cliente y lempiras')
+    other=must(api.post('/api/clients',json={'name':'Otro cliente'}),201)
+    contact=must(api.post(f'/api/clients/{customer["id"]}/contacts',json={'name':'Contacto comercial','phone':'9999'}),201)
+    assert must(api.get(f'/api/clients/{customer["id"]}/contacts'))==[contact]
+    assert api.post('/api/cases',json={'client_id':other['id'],'contact_id':contact['id'],'subject':'Relación incorrecta'}).status_code==422
+    c=mutate(api,c,'take')
+    quote_body={'version':c['version'],'key':key(),'items':[item()],'currency':'USD','valid_until':str(today()+timedelta(days=10))}
+    assert api.post(f'/api/cases/{c["id"]}/quotes',json=quote_body).status_code==422
+    base={'version':c['version'],'key':key(),**conversion()}
+    assert api.post(f'/api/cases/{c["id"]}/convert',json={**base,'currency':'USD'}).status_code==422
+    assert api.post(f'/api/cases/{c["id"]}/convert',json={**base,'key':key(),'payment_terms':'Contado y Crédito'}).status_code==422
+    c=must(api.post(f'/api/cases/{c["id"]}/convert',json=base))
+    assert c['production']['currency']=='HNL' and c['production']['payment_terms']=='Contado'
+    assert c['production']['authorized_at'] is None and c['production']['specs_snapshot']['items']
+    assert c['production']['owner_id'] is None and 'substage' not in c['items'][0] and 'substage' not in c['production']['specs_snapshot']['items'][0]
+    assert len([e for e in c['ledger'] if e['kind']=='Obligación'])==1
+    assert api.post(f'/api/cases/{c["id"]}/production/approve',json={}).status_code in (404,405)
+    assert api.post(f'/api/cases/{c["id"]}/production/items/{c["items"][0]["id"]}',json={}).status_code in (404,405)
+
+
+def test_legacy_usd_records_are_not_reused_or_repriced(clients,accounts):
+    api=clients['admin'];_,c=create(api,'Trabajo USD histórico');c=mutate(api,c,'take')
+    with SessionLocal.begin() as db:
+        quote=Quote(case_id=c['id'],version=1,items=[item()],total=Decimal('1000'),currency='USD',valid_until=today()+timedelta(days=2),status='Aceptada')
+        db.add(quote);db.flush();quote_id=quote.id
+    c=must(api.get(f'/api/cases/{c["id"]}'))
+    result=api.post(f'/api/cases/{c["id"]}/convert',json={'version':c['version'],'key':key(),**conversion(),'items':[],'quote_id':quote_id})
+    assert result.status_code==409 and 'USD' in result.json()['detail']
+    assert must(api.get(f'/api/cases/{c["id"]}'))['production'] is None
+    with SessionLocal.begin() as db:
+        case=db.get(Case,c['id']);case.mode='Producción'
+        db.add(Production(case_id=case.id,price=Decimal('1000'),currency='USD',payment_terms='Crédito comercial 30 días',advance_required=0,payment_due_date=today(),delivery_method='Retiro'))
+        db.flush()
+        product=Item(case_id=case.id,product=item()['product'],quantity=Decimal('100'),unit='unidades',unit_price=Decimal('10'),specs={})
+        db.add(product);db.add(Ledger(case_id=case.id,kind='Obligación',amount=Decimal('1000'),currency='USD',due_date=today(),reference='Histórico USD',actor_id=accounts['admin']['id']))
+    c=must(api.get(f'/api/cases/{c["id"]}'))
+    assert c['production']['currency']=='USD' and c['production']['payment_terms']=='Crédito comercial 30 días' and c['balance']=='1000.00'
+    payment=api.post(f'/api/cases/{c["id"]}/payments',json={'version':c['version'],'key':key(),'amount':'10','reference':'No mezclar moneda'})
+    assert payment.status_code==409
+    unchanged=must(api.get(f'/api/cases/{c["id"]}'))
+    assert unchanged['balance']=='1000.00' and len(unchanged['ledger'])==1
+
+
 def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts):
     api=clients['admin']
     _,c=create(api,'Tarjetas para sucursal')
@@ -75,21 +121,21 @@ def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts)
     assert c['items'][0]['quantity']=='100.000' and c['production']['stage']=='Preparación'
     assert any(e['body']=='Conservar esta conversación' for e in c['events'])
     assert c['balance']=='1000.00'
-    c=mutate(api,c,'production/schedule',{'scheduled_at':datetime.now(timezone.utc).isoformat(),'committed_date':str(today()+timedelta(days=2)),'reason':'Turno de taller confirmado'})
+    c=mutate(api,c,'production/schedule',{'scheduled_at':datetime.now(timezone.utc).isoformat(),'committed_date':str(today()+timedelta(days=2))})
+    schedule_event=next(e for e in c['events'] if e['data'].get('action')=='schedule')
+    assert schedule_event['data']['current']['committed_date']==str(today()+timedelta(days=2))
     assert len(must(api.get('/api/calendar')))==2
     c=mutate(api,c,'production/stage',{'stage':'Programado'})
-    mutate(api,c,'production/stage',{'stage':'En producción'},422)
+    c=mutate(api,c,'production/stage',{'stage':'En producción'})
+    assert c['production']['authorized_at'] is None
     upload=api.post(f'/api/cases/{c["id"]}/attachments',files={'file':('arte.pdf',b'%PDF-1.4\n%%EOF','application/pdf')},data={'art_version':'v1'})
     must(upload,201)
     c=must(api.get(f'/api/cases/{c["id"]}'))
-    mutate(api,c,'production/approve',{'art_version':'v1','evidence':'Aprobado por cliente'},422)
     payment={'version':c['version'],'key':key(),'kind':'Anticipo','amount':'100.00','reference':'Recibo 001'}
     c=must(api.post(f'/api/cases/{c["id"]}/payments',json=payment))
     repeated=must(api.post(f'/api/cases/{c["id"]}/payments',json=payment))
     assert repeated['balance']=='900.00' and len(repeated['ledger'])==2
-    c=mutate(api,c,'production/approve',{'art_version':'v1','evidence':'Aprobado por cliente'})
-    assert c['production']['approved_snapshot']['items'][0]['specs']['material']=='Couché 300 g'
-    c=mutate(api,c,'production/stage',{'stage':'En producción'})
+    assert c['production']['specs_snapshot']['items'][0]['specs']['material']=='Couché 300 g'
     c=mutate(api,c,'production/block',{'reason':'Falta material'})
     mutate(api,c,'production/stage',{'stage':'Calidad'},422)
     c=mutate(api,c,'production/unblock',{'reason':'Material recibido'})
@@ -141,6 +187,7 @@ def test_simultaneous_take_convert_and_payment(clients,accounts):
 
 def test_permissions_files_csrf_and_cancellation(clients,accounts):
     api=clients['admin'];_,c=create(api)
+    assert must(api.get('/api/auth/me'))['timezone']==settings.app_timezone
     assert clients['printer'].get(f'/api/cases/{c["id"]}').status_code==404
     assert clients['agent'].post('/api/users',json={'username':'bad','name':'Bad','password':'no-default-password','roles':['Administrador']}).status_code==403
     assert api.post('/api/clients',json={'name':'CSRF'},headers={'X-Comgraf-Request':'0'}).status_code==403

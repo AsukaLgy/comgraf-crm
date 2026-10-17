@@ -31,6 +31,13 @@ def create_client(data: ClientInput, user=Depends(current_user), db=Depends(get_
     return row(client, ('search_text',))
 
 
+@router.get('/{client_id}/contacts')
+def contacts(client_id: int, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    require(db, user, 'clients')
+    if not db.get(Client, client_id): raise HTTPException(404, 'Cliente no encontrado')
+    return [row(c) for c in db.scalars(select(Contact).where(Contact.client_id == client_id).order_by(Contact.name))]
+
+
 @router.get('/{client_id}')
 def profile(client_id: int, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'clients')

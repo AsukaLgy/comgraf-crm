@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Money = Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)]
 Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
+# This is the server contract; frontend/src/domain.js mirrors these choices for form controls.
 Status = Literal['Nuevo', 'En atención', 'Esperando al cliente', 'Esperando gestión interna', 'Cerrado']
 Stage = Literal['Preparación', 'Programado', 'En producción', 'Calidad', 'Listo para entregar', 'Entregado']
 Product = Literal['Tarjetas de presentación', 'Talonarios y facturas', 'Volantes y flyers', 'Libretas y cuadernos', 'Banners y lonas', 'Otros trabajos']
@@ -14,6 +15,7 @@ class Input(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
 
 
+# ---- Sesión, usuarios y perfiles comerciales ----
 class LoginInput(Input):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=200)
@@ -73,9 +75,9 @@ class Mutation(Input):
     key: str = Field(min_length=16, max_length=80)
 
 
+# ---- Atención, comunicación y tareas ----
 class Assignment(Mutation):
     owner_id: int | None = None
-    responsibility: Literal['atencion', 'produccion', 'cobranza'] = 'atencion'
 
 
 class CaseUpdate(Mutation):
@@ -122,6 +124,7 @@ class Specs(Input):
     detail: str = Field(default='', max_length=3000)
 
 
+# ---- Cotización y conversión a una orden activa ----
 class ItemInput(Input):
     product: Product
     quantity: Quantity
@@ -132,7 +135,7 @@ class ItemInput(Input):
 
 class QuoteInput(Mutation):
     items: list[ItemInput] = Field(min_length=1, max_length=100)
-    currency: Literal['HNL', 'USD'] = 'HNL'
+    currency: Literal['HNL'] = 'HNL'
     valid_until: date
 
 
@@ -144,20 +147,14 @@ class QuoteDecision(Mutation):
 class Conversion(Mutation):
     quote_id: int | None = None
     items: list[ItemInput] = Field(default_factory=list, max_length=100)
-    owner_id: int | None = None
     requested_date: date | None = None
     committed_date: date | None = None
-    currency: Literal['HNL', 'USD'] = 'HNL'
-    payment_terms: str = Field(default='Contado', min_length=1, max_length=240)
+    currency: Literal['HNL'] = 'HNL'
+    payment_terms: Literal['Contado', 'Crédito'] = 'Contado'
     advance_required: Money = Decimal('0')
     payment_due_date: date
     delivery_method: str = Field(min_length=1, max_length=120)
     instructions: str = Field(default='', max_length=10000)
-
-
-class Approval(Mutation):
-    art_version: str = Field(min_length=1, max_length=100)
-    evidence: str = Field(min_length=3, max_length=3000)
 
 
 class StageInput(Mutation):
@@ -165,6 +162,7 @@ class StageInput(Mutation):
     reason: str = Field(default='', max_length=3000)
 
 
+# ---- Producción, entregas y movimientos financieros ----
 class ReasonInput(Mutation):
     reason: str = Field(min_length=3, max_length=3000)
 
@@ -172,17 +170,11 @@ class ReasonInput(Mutation):
 class ScheduleInput(Mutation):
     committed_date: date
     scheduled_at: datetime
-    reason: str = Field(min_length=3, max_length=3000)
 
     @field_validator('scheduled_at')
     @classmethod
     def utc(cls, value):
         return TaskInput.utc(value)
-
-
-class SubstageInput(Mutation):
-    substage: Literal['Diseño', 'Preprensa', 'Impresión', 'Acabados', 'Finalizado']
-    reason: str = Field(default='', max_length=3000)
 
 
 class DeliveryInput(Mutation):
@@ -216,6 +208,7 @@ class DraftInput(Input):
     version: int = Field(ge=0)
 
 
+# ---- Preferencias de bandeja ----
 class ViewInput(Input):
     name: str = Field(min_length=1, max_length=100)
     filters: dict
