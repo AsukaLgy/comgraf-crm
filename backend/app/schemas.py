@@ -6,8 +6,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 Money = Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)]
 Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
 # This is the server contract; frontend/src/domain.js mirrors these choices for form controls.
-Status = Literal['Nuevo', 'En atención', 'Esperando al cliente', 'Esperando gestión interna', 'Cerrado']
-Stage = Literal['Preparación', 'Programado', 'En producción', 'Calidad', 'Listo para entregar', 'Entregado']
+Status = Literal['Abierto', 'Cerrado']
+Stage = Literal['NEW', 'APPROVAL', 'PRINTING', 'WORKSHOP', 'READY']
+STAGE_LABELS = {
+    'NEW': 'Nuevo',
+    'APPROVAL': 'Aprobación',
+    'PRINTING': 'Impresión',
+    'WORKSHOP': 'Taller',
+    'READY': 'Listo para entregar',
+}
+NEXT_STAGE = {'NEW': 'APPROVAL', 'APPROVAL': 'PRINTING', 'PRINTING': 'WORKSHOP', 'WORKSHOP': 'READY'}
+PREVIOUS_STAGES = {
+    'APPROVAL': {'NEW'},
+    'PRINTING': {'NEW', 'APPROVAL'},
+    'WORKSHOP': {'NEW', 'APPROVAL', 'PRINTING'},
+    'READY': {'NEW', 'APPROVAL', 'PRINTING', 'WORKSHOP'},
+}
 Product = Literal['Tarjetas de presentación', 'Talonarios y facturas', 'Volantes y flyers', 'Libretas y cuadernos', 'Banners y lonas', 'Otros trabajos']
 
 
@@ -82,11 +96,17 @@ class Assignment(Mutation):
 
 class CaseUpdate(Mutation):
     status: Status
-    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente']
-    next_action: str = Field(default='', max_length=500)
-    pending_message: bool = False
-    reason: str = Field(default='', max_length=2000)
-    summary: str = Field(default='', max_length=10000)
+    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente'] | None = None
+    next_action: str | None = Field(default=None, max_length=500)
+
+
+class TaskReschedule(Mutation):
+    due_at: datetime
+
+    @field_validator('due_at')
+    @classmethod
+    def utc(cls, value):
+        return TaskInput.utc(value)
 
 
 class EventInput(Mutation):
@@ -189,6 +209,11 @@ class DeliveryInput(Mutation):
     @classmethod
     def utc(cls, value):
         return TaskInput.utc(value)
+
+
+class DeliveryWithPaymentInput(DeliveryInput):
+    payment_amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)] | None = None
+    payment_reference: str | None = Field(default=None, min_length=1, max_length=240)
 
 
 class PaymentInput(Mutation):

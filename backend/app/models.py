@@ -79,7 +79,7 @@ class Case(Base):
     # Legacy area-specific owner retained for historical visibility; new work uses owner_id only.
     collection_owner_id = Column(ForeignKey('users.id'))
     priority = Column(String(20), nullable=False, default='Normal')
-    status = Column(String(40), nullable=False, default='Nuevo', index=True)
+    status = Column(String(40), nullable=False, default='Abierto', index=True)
     mode = Column(String(20), nullable=False, default='Atención', index=True)
     next_action = Column(String(500), nullable=False, default='')
     pending_message = Column(Boolean, nullable=False, default=False)
@@ -137,7 +137,10 @@ class Production(Base):
     quote_id = Column(ForeignKey('quotes.id'), unique=True)
     # Legacy assignment column; current ownership is the case's principal owner.
     owner_id = Column(ForeignKey('users.id'))
-    stage = Column(String(40), nullable=False, default='Preparación', index=True)
+    # Stable workflow code; NULL means an old stage needs explicit classification.
+    stage = Column(String(40), nullable=True, default='NEW', index=True)
+    legacy_stage = Column(String(40))
+    classification_required = Column(Boolean, nullable=False, default=False)
     stage_started_at = Column(DateTime, nullable=False, default=now)
     blocked_since = Column(DateTime)
     block_reason = Column(Text)
@@ -262,3 +265,7 @@ class ProviderInbox(Base):
 
 
 Index('ix_case_pool', Case.status, Case.owner_id)
+Index('ix_task_due_open_case', Task.done_at, Task.due_at, Task.case_id)
+Index('ix_ledger_due_case', Ledger.due_date, Ledger.case_id)
+Index('ix_delivery_case_item', Delivery.case_id, Delivery.item_id)
+Index('ix_production_active_stage', Production.cancelled_at, Production.stage, Production.case_id)

@@ -1,16 +1,15 @@
 import hashlib
 import json
 from decimal import Decimal, ROUND_HALF_UP
-from typing import get_args
 from fastapi import HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from .models import Case, Delivery, Event, Idempotency, Item, Ledger, Production, Quote, Task, User, now
 from .security import can, require
-from .repository import get_case, today, row, delivery_status, local_day, quantity_text
-from .schemas import Stage
+from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance
+from . import schemas as s
 
-# Keep workflow ordering derived from the server-validated stage values.
-STAGES = get_args(Stage)
+NEXT_STAGE = s.NEXT_STAGE
+PREVIOUS_STAGES = s.PREVIOUS_STAGES
 CURRENCY_HNL = 'HNL'
 
 
@@ -61,9 +60,14 @@ def take(db, user, case_id, data):
         return case
     if case.owner_id:
         fail('Otro trabajador ya tomó este caso', 409)
-    if case.status == 'Cerrado': fail('El caso está cerrado', 409)
-    count = db.scalar(select(func.count()).select_from(Case).where(Case.owner_id == user.id, Case.status != 'Cerrado'))
-    if count >= user.capacity: fail('Alcanzaste tu capacidad de casos abiertos', 409)
+    undelivered_item = select(Item.id).where(
+        Item.case_id == Case.id,
+        func.coalesce(select(func.sum(Delivery.quantity)).where(Delivery.item_id == Item.id).correlate(Item).scalar_subquery(), 0) < Item.quantity,
+    ).correlate(Case).exists()
+    active_production = select(Production.case_id).where(Production.case_id == Case.id, Production.cancelled_at.is_(None), undelivered_item).correlate(Case).exists()
+    has_open_task = select(Task.id).where(Task.case_id == Case.id, Task.done_at.is_(None)).correlate(Case).exists()
+    count = db.scalar(select(func.count()).select_from(Case).where(Case.owner_id == user.id, or_(Case.status == 'Abierto', active_production, has_open_task)))
+    if count >= user.capacity: fail('Alcanzaste tu capacidad de expedientes pendientes', 409)
     if case.version != data.version: fail('El caso cambió. Actualiza la bandeja.', 409)
     case.owner_id = user.id
     case.version += 1
@@ -85,20 +89,15 @@ def update_case(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'update', 'attention')
     if not changed: return case
     old = case.status
-    if old == 'Cerrado' and data.status != old:
-        require(db, user, 'reopen')
-        if not data.reason: fail('La reapertura requiere motivo')
-        case.closed_at = None
     if old != 'Cerrado' and data.status == 'Cerrado':
-        if not data.reason or not data.summary: fail('Indica motivo y resumen del cierre')
-        if db.scalar(select(Task.id).where(Task.case_id == case_id, Task.done_at.is_(None)).limit(1)):
-            fail('Completa los seguimientos pendientes antes de cerrar')
+        if db.scalar(select(Task.id).where(Task.case_id == case_id, Task.done_at.is_(None), Task.due_at <= now()).limit(1)):
+            fail('Resuelve o reprograma los seguimientos vencidos antes de cerrar atención', 409)
         case.closed_at = now()
-        case.close_reason = data.reason
-        case.close_summary = data.summary
-    case.status, case.priority = data.status, data.priority
-    case.next_action, case.pending_message = data.next_action, data.pending_message
-    event(db, case, user, f'Atención: {old} → {data.status}. {data.reason} {data.summary}', data={'action': 'attention_status', 'from': old, 'to': data.status})
+        case.pending_message = False
+    case.status = data.status
+    if data.priority is not None: case.priority = data.priority
+    if data.next_action is not None: case.next_action = data.next_action
+    event(db, case, user, f'Atención: {old} → {data.status}', data={'action': 'attention_status', 'from': old, 'to': data.status, 'origin': 'manual'})
     return case
 
 
@@ -111,10 +110,14 @@ def add_event(db, user, case_id, data):
     if data.kind == 'Interacción manual' and data.channel == 'Nota': fail('Selecciona el canal de la interacción')
     event(db, case, user, data.body, data.kind, data.channel, {'direction': data.direction, 'manual': True})
     if data.kind == 'Interacción manual':
-        if data.direction == 'Entrante': case.pending_message = True
-        else:
-            case.pending_message = False
-            if case.first_response_at is None: case.first_response_at = now()
+        if data.direction == 'Entrante':
+            case.pending_message = True
+            if case.status == 'Cerrado':
+                old = case.status
+                case.status = 'Abierto'
+                event(db, case, user, 'Atención abierta automáticamente por una interacción entrante', data={'action': 'attention_status', 'from': old, 'to': 'Abierto', 'origin': 'automatic'})
+        if data.direction == 'Saliente' and case.first_response_at is None:
+            case.first_response_at = now()
     return case
 
 
@@ -122,10 +125,13 @@ def add_task(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'task', 'attention')
     if not changed: return case
     active_user(db, data.owner_id, 'attention')
-    if case.status == 'Cerrado': fail('Reabre el caso antes de programar un seguimiento')
     db.add(Task(case_id=case.id, owner_id=data.owner_id, title=data.title, due_at=data.due_at))
     case.next_action = data.title
     event(db, case, user, f'Seguimiento programado: {data.title}', data={'due_at': data.due_at.isoformat() + 'Z', 'owner_id': data.owner_id})
+    if data.due_at <= now() and case.status == 'Cerrado':
+        old = case.status
+        case.status = 'Abierto'
+        event(db, case, user, 'Atención abierta automáticamente por un seguimiento vencido', data={'action': 'attention_status', 'from': old, 'to': 'Abierto', 'origin': 'automatic'})
     return case
 
 
@@ -138,6 +144,37 @@ def complete_task(db, user, case_id, task_id, data):
     task.done_at = now()
     event(db, case, user, f'Seguimiento completado: {task.title}')
     return case
+
+
+def reschedule_task(db, user, case_id, task_id, data):
+    case, changed = mutation(db, user, case_id, data, f'task_reschedule:{task_id}', 'attention')
+    if not changed: return case
+    task = db.get(Task, task_id)
+    if not task or task.case_id != case_id: fail('Seguimiento no encontrado', 404)
+    if task.done_at: fail('No se puede reprogramar un seguimiento completado', 409)
+    previous = task.due_at
+    task.due_at = data.due_at
+    event(db, case, user, f'Seguimiento reprogramado: {task.title}', data={'action': 'task_rescheduled', 'task_id': task.id, 'previous_due_at': previous.isoformat() + 'Z', 'due_at': data.due_at.isoformat() + 'Z'})
+    if data.due_at <= now() and case.status == 'Cerrado':
+        old = case.status
+        case.status = 'Abierto'
+        event(db, case, user, 'Atención abierta automáticamente por un seguimiento vencido', data={'action': 'attention_status', 'from': old, 'to': 'Abierto', 'origin': 'automatic'})
+    return case
+
+
+def reopen_overdue_attention(db):
+    """Idempotent recovery pass; called at startup and periodically by the app."""
+    due_cases = db.scalars(select(Case).where(
+        Case.status == 'Cerrado',
+        select(Task.id).where(Task.case_id == Case.id, Task.done_at.is_(None), Task.due_at <= now()).exists(),
+    ).with_for_update()).all()
+    for case in due_cases:
+        case.status = 'Abierto'
+        case.version += 1
+        db.add(Event(case_id=case.id, actor_id=None, kind='Sistema', channel='Sistema',
+            body='Atención abierta automáticamente por vencimiento de seguimiento',
+            data={'action': 'attention_status', 'from': 'Cerrado', 'to': 'Abierto', 'origin': 'automatic'}))
+    return len(due_cases)
 
 
 def total(items):
@@ -175,7 +212,6 @@ def convert(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'convert', 'attention')
     if not changed: return case
     if case.mode == 'Producción': fail('El expediente ya está en producción', 409)
-    if case.status == 'Cerrado': fail('Reabre la atención antes de convertir')
     items = [i.model_dump(mode='json') for i in data.items]
     if data.quote_id:
         quote = db.get(Quote, data.quote_id)
@@ -185,7 +221,7 @@ def convert(db, user, case_id, data):
     if not items: fail('Agrega al menos un producto')
     price = total(items)
     if data.advance_required > price: fail('El anticipo no puede superar el precio')
-    production = Production(case_id=case.id, quote_id=data.quote_id,
+    production = Production(case_id=case.id, quote_id=data.quote_id, stage='NEW',
         requested_date=data.requested_date, original_committed_date=data.committed_date,
         committed_date=data.committed_date, price=price, currency=CURRENCY_HNL,
         payment_terms=data.payment_terms, advance_required=data.advance_required,
@@ -199,7 +235,7 @@ def convert(db, user, case_id, data):
     db.add(Ledger(case_id=case.id, kind='Obligación', amount=price, currency=CURRENCY_HNL,
         due_date=data.payment_due_date, reference='Orden de producción', actor_id=user.id))
     case.mode = 'Producción'
-    event(db, case, user, f'Orden de producción generada por {user.name} · Preparación', data={'action': 'converted', 'quote_id': data.quote_id, 'currency': CURRENCY_HNL})
+    event(db, case, user, f'Orden generada por {user.name} · Nuevo', data={'action': 'converted', 'quote_id': data.quote_id, 'currency': CURRENCY_HNL})
     return case
 
 
@@ -215,20 +251,25 @@ def change_stage(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'stage', 'production')
     if not changed: return case
     production = get_production(db, case)
-    old = production.stage
-    source, target = STAGES.index(old), STAGES.index(data.stage)
-    if target == source: fail('La etapa ya está activa', 409)
     if production.blocked_since: fail('Resuelve el bloqueo antes de cambiar de etapa')
-    if target > source + 1: fail('No se pueden saltar etapas')
-    if target < source and not data.reason: fail('El retroceso requiere motivo')
-    if old == 'Entregado': fail('Un trabajo entregado no puede retroceder; abre un caso relacionado de retrabajo')
-    if target == 1 and (not production.scheduled_at or not production.committed_date):
-        fail('Define inicio programado y fecha comprometida antes de avanzar')
-    if data.stage == 'Entregado': fail('La etapa Entregado se establece al completar las entregas')
-    if target < source and delivery_status(db, case.id) != 'Pendiente': fail('Ya existen entregas; registra el retrabajo en un caso relacionado')
+    if production.classification_required or production.stage is None:
+        legacy = production.legacy_stage
+        production.stage = data.stage
+        production.classification_required = False
+        production.stage_started_at = now()
+        event(db, case, user, f'Clasificación explícita de etapa histórica: {legacy or "Sin etapa legible"} → {s.STAGE_LABELS[data.stage]}', data={'action': 'stage_classified', 'legacy_stage': legacy, 'stage': data.stage, 'origin': 'manual_classification'})
+        return case
+    old = production.stage
+    if data.stage == old: fail('La etapa ya está activa', 409)
+    if delivery_status(db, case.id) == 'Completa': fail('La entrega está completa; no se puede reabrir la producción desde este caso', 409)
+    next_stage = NEXT_STAGE.get(old)
+    moving_back = data.stage in PREVIOUS_STAGES.get(old, set())
+    if data.stage != next_stage and not moving_back: fail('La etapa debe avanzar a la siguiente o retroceder con motivo explícito')
+    if moving_back and not data.reason: fail('El retroceso requiere motivo')
+    if delivery_status(db, case.id) != 'Pendiente' and moving_back: fail('Ya existen entregas; registra el retrabajo en un caso relacionado')
     duration = (now() - production.stage_started_at).total_seconds()
     production.stage, production.stage_started_at = data.stage, now()
-    event(db, case, user, f'Producción: {old} → {data.stage}. {data.reason}', data={'action': 'stage', 'from': old, 'to': data.stage, 'seconds': duration, 'rework': target < source})
+    event(db, case, user, f'Producción: {s.STAGE_LABELS[old]} → {s.STAGE_LABELS[data.stage]}' + (f'. {data.reason}' if data.reason else ''), data={'action': 'stage', 'from': old, 'to': data.stage, 'seconds': duration, 'rework': moving_back})
     return case
 
 
@@ -236,7 +277,7 @@ def block(db, user, case_id, data, unblock=False):
     case, changed = mutation(db, user, case_id, data, 'unblock' if unblock else 'block', 'production')
     if not changed: return case
     production = get_production(db, case)
-    if production.stage == 'Entregado': fail('El trabajo ya fue entregado')
+    if delivery_status(db, case.id) == 'Completa': fail('El trabajo ya fue entregado')
     if unblock:
         if not production.blocked_since: fail('El trabajo no está bloqueado')
         seconds = (now() - production.blocked_since).total_seconds()
@@ -253,7 +294,7 @@ def schedule(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'schedule', 'production')
     if not changed: return case
     production = get_production(db, case)
-    if production.stage == 'Entregado': fail('El trabajo ya fue entregado')
+    if delivery_status(db, case.id) == 'Completa': fail('El trabajo ya fue entregado')
     previous_scheduled, previous_committed = production.scheduled_at, production.committed_date
     if not production.original_committed_date: production.original_committed_date = data.committed_date
     production.committed_date, production.scheduled_at = data.committed_date, data.scheduled_at
@@ -265,9 +306,9 @@ def cancel(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'cancel', 'assign')
     if not changed: return case
     production = get_production(db, case)
-    if production.stage == 'Entregado': fail('No se puede cancelar una producción completamente entregada')
+    if delivery_status(db, case.id) == 'Completa': fail('No se puede anular una producción completamente entregada')
     production.cancelled_at = now()
-    event(db, case, user, f'Producción cancelada: {data.reason}. Los cobros y entregas se conservan.', data={'action': 'cancelled'})
+    event(db, case, user, f'Trabajo anulado: {data.reason}. Los cobros y entregas se conservan.', data={'action': 'cancelled', 'reason': data.reason})
     return case
 
 
@@ -276,7 +317,7 @@ def deliver(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'delivery', 'production')
     if not changed: return case
     production = get_production(db, case)
-    if production.stage != 'Listo para entregar' or production.blocked_since: fail('El trabajo debe estar listo y sin bloqueos')
+    if production.stage != 'READY' or production.classification_required or production.blocked_since: fail('El trabajo debe estar clasificado, listo y sin bloqueos')
     if data.delivered_at > now(): fail('La entrega no puede estar en el futuro')
     item = db.get(Item, data.item_id)
     if not item or item.case_id != case.id: fail('Partida no encontrada', 404)
@@ -284,11 +325,20 @@ def deliver(db, user, case_id, data):
     if delivered + data.quantity > item.quantity: fail('La cantidad supera lo pendiente de esta partida')
     db.add(Delivery(case_id=case.id, item_id=item.id, quantity=data.quantity, delivered_at=data.delivered_at, receiver=data.receiver, method=data.method, evidence=data.evidence, actor_id=user.id))
     db.flush()
+    payment_amount = getattr(data, 'payment_amount', None)
+    payment_reference = getattr(data, 'payment_reference', None)
+    if bool(payment_amount) != bool(payment_reference): fail('Para registrar un pago junto a la entrega indica importe y referencia')
+    if payment_amount:
+        require(db, user, 'finance')
+        if production.currency != CURRENCY_HNL: fail('Esta orden histórica está en USD; no admite pagos nuevos en HNL', 409)
+        current_balance = Decimal(balance(db, case.id)['balance'])
+        if current_balance <= 0 or payment_amount > current_balance: fail('El pago debe ser positivo y no superar el saldo actual')
+        db.add(Ledger(case_id=case.id, kind='Abono', amount=-payment_amount, currency=production.currency, reference=payment_reference, actor_id=user.id))
+        event(db, case, user, f'Abono: {payment_amount} {production.currency}. {payment_reference}', data={'financial': True, 'action': 'payment'})
     event(db, case, user, f'Entrega: {quantity_text(data.quantity)} {item.unit} de {item.product} a {data.receiver}', data={'action': 'delivery', 'item_id': item.id, 'on_time_original': bool(production.original_committed_date and local_day(data.delivered_at) <= production.original_committed_date)})
     if delivery_status(db, case.id) == 'Completa':
         duration = (now() - production.stage_started_at).total_seconds()
-        production.stage, production.stage_started_at = 'Entregado', now()
-        event(db, case, user, 'Entrega completa. La situación de pago se conserva.', data={'action': 'stage', 'from': 'Listo para entregar', 'to': 'Entregado', 'seconds': duration})
+        event(db, case, user, 'Entrega completa. Se detiene el tiempo activo de producción y la situación de pago se conserva.', data={'action': 'delivery_completed', 'stage': production.stage, 'seconds': duration})
     return case
 
 

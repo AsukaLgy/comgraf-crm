@@ -1,12 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import uuid
-from sqlalchemy import select
 from app.db import engine, SessionLocal
 from app.config import settings
-from app.models import Case, Production, Ledger, Item, Quote
+from app.models import Case, Production, Ledger, Item, Quote, Task
 from app.repository import today
+from app.services import reopen_overdue_attention
 
 
 def key(): return str(uuid.uuid4())
@@ -49,7 +49,7 @@ def test_attention_history_search_and_drafts(clients):
     c=mutate(api,c,'tasks',{'title':'Confirmar información','owner_id':c['owner_id'],'due_at':(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat()})
     assert must(api.get('/api/cases?view=action'))['total']==1
     c=mutate(api,c,f'tasks/{c["tasks"][0]["id"]}/complete')
-    c=mutate(api,c,'attention',{'status':'Cerrado','priority':'Normal','reason':'Consulta resuelta','summary':'No requiere producción'})
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
     assert c['mode']=='Atención' and c['production'] is None
     assert len(c['drafts'])==3
     for term in ['maria alvarez','0801199000123','50499991234','maria@example.test',c['number']]:
@@ -60,6 +60,111 @@ def test_attention_history_search_and_drafts(clients):
     assert must(api.get('/api/counts'))['history']==1
     engine.dispose()
     assert must(api.get(f'/api/cases/{original}'))['status']=='Cerrado'
+
+
+def test_attention_can_open_and_close_without_reason_and_incoming_reopens(clients):
+    api=clients['admin'];_,c=create(api,'Atención independiente del trabajo')
+    c=mutate(api,c,'take')
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
+    assert c['status']=='Cerrado' and c['production'] is None and c['close_reason'] is None
+    assert must(api.get('/api/cases?view=action'))['total']==0
+    c=mutate(api,c,'events',{'kind':'Nota interna','channel':'Nota','body':'Nota guardada después del cierre'})
+    assert c['status']=='Cerrado' and must(api.get('/api/cases?view=action'))['total']==0
+    c=mutate(api,c,'attention',{'status':'Abierto'})
+    assert c['status']=='Abierto' and must(api.get('/api/cases?view=action'))['total']==1
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
+    c=mutate(api,c,'events',{'kind':'Interacción manual','channel':'Llamada','direction':'Entrante','body':'Nueva consulta entrante'})
+    assert c['status']=='Abierto' and c['pending_message']
+    automated=[e for e in c['events'] if e['data'].get('action')=='attention_status' and e['data'].get('origin')=='automatic']
+    assert len(automated)==1
+
+
+def test_future_followup_close_then_due_recovery_and_reschedule(clients):
+    api=clients['admin'];_,c=create(api,'Seguimiento independiente')
+    c=mutate(api,c,'take')
+    due=(datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+    c=mutate(api,c,'tasks',{'title':'Llamar después','owner_id':c['owner_id'],'due_at':due})
+    task=c['tasks'][0]
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
+    assert c['status']=='Cerrado' and c['tasks'][0]['done_at'] is None
+    assert must(api.get('/api/cases?view=action'))['total']==0
+    with SessionLocal.begin() as db:
+        db.get(Task,task['id']).due_at=datetime.now(timezone.utc).replace(tzinfo=None)-timedelta(minutes=1)
+    with SessionLocal.begin() as db:
+        assert reopen_overdue_attention(db)==1
+    c=must(api.get(f'/api/cases/{c["id"]}'))
+    assert c['status']=='Abierto' and must(api.get('/api/cases?view=action'))['total']==1
+    with SessionLocal.begin() as db:
+        assert reopen_overdue_attention(db)==0
+    automatic=[e for e in c['events'] if e['data'].get('origin')=='automatic']
+    assert len(automatic)==1
+    new_due=datetime.now(timezone.utc)+timedelta(days=2)
+    payload={'version':c['version'],'key':key(),'due_at':new_due.isoformat()}
+    c=must(api.put(f'/api/cases/{c["id"]}/tasks/{task["id"]}',json=payload))
+    assert c['tasks'][0]['done_at'] is None and c['tasks'][0]['due_at'].startswith((new_due.date()).isoformat())
+
+
+def test_delivery_and_payment_are_one_idempotent_financial_operation(clients):
+    api=clients['admin'];_,c=create(api,'Entrega con abono')
+    c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
+    for stage in ['APPROVAL','PRINTING','WORKSHOP','READY']:
+        c=mutate(api,c,'production/stage',{'stage':stage})
+    owner=c['owner_id']; stage=c['production']['stage']
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
+    assert c['production']['stage']==stage and c['owner_id']==owner
+    assert must(api.get('/api/cases?view=mine'))['total']==1
+    assert must(api.get('/api/cases?view=action'))['total']==0
+    payload={'version':c['version'],'key':key(),'item_id':c['items'][0]['id'],'quantity':'40','delivered_at':datetime.now(timezone.utc).isoformat(),'receiver':'Cliente','method':'Retiro','evidence':'Recibo parcial','payment_amount':'100.00','payment_reference':'Recibo HNL 02'}
+    c=must(api.post(f'/api/cases/{c["id"]}/deliveries',json=payload))
+    replay=must(api.post(f'/api/cases/{c["id"]}/deliveries',json=payload))
+    assert replay['delivery_status']=='Parcial' and len(replay['deliveries'])==1
+    assert len(replay['ledger'])==2 and replay['balance']=='900.00'
+    bad={**payload,'version':replay['version'],'key':key(),'quantity':'1','payment_amount':'9999'}
+    assert api.post(f'/api/cases/{c["id"]}/deliveries',json=bad).status_code==422
+    unchanged=must(api.get(f'/api/cases/{c["id"]}'))
+    assert len(unchanged['deliveries'])==1 and len(unchanged['ledger'])==2
+    printer=clients['printer']
+    forbidden={**payload,'version':unchanged['version'],'key':key(),'quantity':'1','payment_amount':'10','payment_reference':'No permiso'}
+    assert printer.post(f'/api/cases/{c["id"]}/deliveries',json=forbidden).status_code==403
+    unchanged=must(api.get(f'/api/cases/{c["id"]}'))
+    assert len(unchanged['deliveries'])==1 and len(unchanged['ledger'])==2
+    final={**payload,'version':unchanged['version'],'key':key(),'quantity':'60','payment_amount':None,'payment_reference':None}
+    c=must(api.post(f'/api/cases/{c["id"]}/deliveries',json=final))
+    assert c['delivery_status']=='Completa' and c['production']['stage']=='READY'
+    assert c['production']['result_label']=='Entregado' and c['production']['active_elapsed_seconds'] is None
+    assert must(api.get('/api/cases?view=production'))['total']==0
+    assert must(api.get('/api/cases?view=balances'))['total']==1
+
+
+def test_historical_ambiguous_stage_requires_explicit_classification(clients):
+    api=clients['admin'];_,c=create(api,'Clasificación heredada')
+    c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
+    with SessionLocal.begin() as db:
+        production=db.get(Production,c['id'])
+        production.legacy_stage='En producción'
+        production.stage=None
+        production.classification_required=True
+    c=must(api.get(f'/api/cases/{c["id"]}'))
+    assert c['production']['stage'] is None and c['production']['legacy_stage']=='En producción'
+    assert c['production']['stage_label']=='Pendiente de clasificación' and c['production']['active_elapsed_seconds'] is None
+    c=mutate(api,c,'production/stage',{'stage':'PRINTING'})
+    assert c['production']['stage']=='PRINTING' and not c['production']['classification_required']
+    classified=[e for e in c['events'] if e['data'].get('action')=='stage_classified']
+    assert len(classified)==1 and classified[0]['data']['origin']=='manual_classification'
+
+
+def test_server_pagination_is_stable_and_counts_match_filters(clients):
+    api=clients['admin']
+    for n in range(5):
+        create(api, f'Paginación {n}')
+    first=must(api.get('/api/cases',params={'view':'action','page':1,'page_size':2}))
+    second=must(api.get('/api/cases',params={'view':'action','page':2,'page_size':2}))
+    third=must(api.get('/api/cases',params={'view':'action','page':3,'page_size':2}))
+    ids=[r['id'] for page in (first,second,third) for r in page['items']]
+    assert len(ids)==len(set(ids))==5
+    assert first['total']==second['total']==third['total']==must(api.get('/api/counts'))['action']==5
+    assert ids==sorted(ids,reverse=True)
+    assert must(api.get('/api/cases',params={'view':'pool','page_size':2}))['total']==must(api.get('/api/counts'))['pool']==5
 
 
 def test_client_contact_relations_and_new_hnl_contract(clients):
@@ -118,15 +223,15 @@ def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts)
     c=mutate(api,c,f'quotes/{quote["id"]}/decision',{'status':'Aceptada','evidence':'Cliente acepta presencialmente la versión 1'})
     c=mutate(api,c,'convert',{**conversion(accounts['printer']['id']),'items':[],'quote_id':quote['id']})
     assert c['id']==quote['case_id'] and c['mode']=='Producción'
-    assert c['items'][0]['quantity']=='100.000' and c['production']['stage']=='Preparación'
+    assert c['items'][0]['quantity']=='100.000' and c['production']['stage']=='NEW'
     assert any(e['body']=='Conservar esta conversación' for e in c['events'])
     assert c['balance']=='1000.00'
     c=mutate(api,c,'production/schedule',{'scheduled_at':datetime.now(timezone.utc).isoformat(),'committed_date':str(today()+timedelta(days=2))})
     schedule_event=next(e for e in c['events'] if e['data'].get('action')=='schedule')
     assert schedule_event['data']['current']['committed_date']==str(today()+timedelta(days=2))
     assert len(must(api.get('/api/calendar')))==2
-    c=mutate(api,c,'production/stage',{'stage':'Programado'})
-    c=mutate(api,c,'production/stage',{'stage':'En producción'})
+    c=mutate(api,c,'production/stage',{'stage':'APPROVAL'})
+    c=mutate(api,c,'production/stage',{'stage':'PRINTING'})
     assert c['production']['authorized_at'] is None
     upload=api.post(f'/api/cases/{c["id"]}/attachments',files={'file':('arte.pdf',b'%PDF-1.4\n%%EOF','application/pdf')},data={'art_version':'v1'})
     must(upload,201)
@@ -137,21 +242,21 @@ def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts)
     assert repeated['balance']=='900.00' and len(repeated['ledger'])==2
     assert c['production']['specs_snapshot']['items'][0]['specs']['material']=='Couché 300 g'
     c=mutate(api,c,'production/block',{'reason':'Falta material'})
-    mutate(api,c,'production/stage',{'stage':'Calidad'},422)
+    mutate(api,c,'production/stage',{'stage':'READY'},422)
     c=mutate(api,c,'production/unblock',{'reason':'Material recibido'})
-    c=mutate(api,c,'production/stage',{'stage':'Calidad'})
-    mutate(api,c,'production/stage',{'stage':'En producción'},422)
-    c=mutate(api,c,'production/stage',{'stage':'En producción','reason':'Retrabajo por diferencia de color'})
-    c=mutate(api,c,'production/stage',{'stage':'Calidad'})
-    c=mutate(api,c,'production/stage',{'stage':'Listo para entregar'})
+    c=mutate(api,c,'production/stage',{'stage':'WORKSHOP'})
+    mutate(api,c,'production/stage',{'stage':'APPROVAL'},422)
+    c=mutate(api,c,'production/stage',{'stage':'PRINTING','reason':'Retrabajo por diferencia de color'})
+    c=mutate(api,c,'production/stage',{'stage':'WORKSHOP'})
+    c=mutate(api,c,'production/stage',{'stage':'READY'})
     assert c['delivery_status']=='Pendiente'
     delivery={'item_id':c['items'][0]['id'],'quantity':'40','delivered_at':datetime.now(timezone.utc).isoformat(),'receiver':'María','method':'Retiro','evidence':'Recibo firmado 01'}
     c=mutate(api,c,'deliveries',delivery)
-    assert c['delivery_status']=='Parcial' and c['production']['stage']=='Listo para entregar'
-    c=mutate(api,c,'attention',{'status':'Cerrado','priority':'Normal','reason':'Atención concluida','summary':'Taller y cobranza continúan'})
+    assert c['delivery_status']=='Parcial' and c['production']['stage']=='READY'
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
     assert must(api.get('/api/cases?view=balances'))['total']==1
     c=mutate(api,c,'deliveries',{**delivery,'quantity':'60'})
-    assert c['production']['stage']=='Entregado' and c['status']=='Cerrado'
+    assert c['production']['stage']=='READY' and c['delivery_status']=='Completa' and c['production']['result_label']=='Entregado' and c['status']=='Cerrado'
     assert Decimal(c['overdue_balance'])==Decimal('900')
     c=mutate(api,c,'payments',{'amount':'900','reference':'Recibo 002'})
     assert c['payment_status']=='Pagado'
@@ -196,7 +301,7 @@ def test_permissions_files_csrf_and_cancellation(clients,accounts):
     printer=must(clients['printer'].get(f'/api/cases/{c["id"]}'))
     assert 'balance' not in printer and 'price' not in printer['production'] and printer['ledger']==[]
     mutate(clients['printer'],c,'payments',{'amount':'5','reference':'No permitido'},403)
-    mutate(clients['cashier'],c,'production/stage',{'stage':'Programado'},403)
+    mutate(clients['cashier'],c,'production/stage',{'stage':'APPROVAL'},403)
     mutate(clients['agent'],c,'events',{'kind':'Nota interna','channel':'WhatsApp','body':'No enviar nota'},403)
     mutate(api,c,'events',{'kind':'Nota interna','channel':'WhatsApp','body':'No enviar nota'},422)
     bad=api.post(f'/api/cases/{c["id"]}/attachments',files={'file':('evil.pdf',b'<script>bad</script>','application/pdf')})

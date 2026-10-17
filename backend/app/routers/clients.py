@@ -43,7 +43,7 @@ def profile(client_id: int, user=Depends(current_user), db=Depends(get_db, scope
     require(db, user, 'clients')
     client = db.get(Client, client_id)
     if not client: raise HTTPException(404, 'Cliente no encontrado')
-    cases = cases_list(db, user, {'view': 'all', 'client_id': client_id})
+    cases = cases_list(db, user, {'view': 'all', 'client_id': client_id}, paginated=False)
     return {**row(client, ('search_text',)), 'contacts': [row(c) for c in db.scalars(select(Contact).where(Contact.client_id == client_id))],
             'cases': [case_detail(db, user, get_case(db, user, c['id'])) for c in cases]}
 

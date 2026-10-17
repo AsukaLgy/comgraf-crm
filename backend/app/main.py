@@ -1,3 +1,6 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request
@@ -6,10 +9,36 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from .config import settings
-from .db import engine
+from .db import engine, SessionLocal
 from .routers import auth, clients, cases, production, reports
+from .services import reopen_overdue_attention
 
-app = FastAPI(title='Comgraf · HTTP interno', docs_url=None, redoc_url=None)
+logger = logging.getLogger(__name__)
+
+async def attention_recovery_loop():
+    """Reopen due follow-ups even when no worker has a browser open."""
+    while True:
+        try:
+            with SessionLocal.begin() as db:
+                reopen_overdue_attention(db)
+        except Exception:
+            # A database outage is retried on the next cycle; it never blocks startup.
+            logger.exception('Falló la recuperación de seguimientos vencidos')
+        await asyncio.sleep(60)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(attention_recovery_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try: await task
+        except asyncio.CancelledError: pass
+
+
+app = FastAPI(title='Comgraf · HTTP interno', docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.middleware('http')

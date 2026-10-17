@@ -4,8 +4,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from ..db import get_db
 from ..models import Case, Production, Task, Event, Quote, Delivery, now
-from ..security import current_user, require, can
-from ..repository import visibility, today, balance, row, delivery_status, local_day
+from ..security import current_user, require
+from ..repository import visibility, balance, row, delivery_status, local_day
+from ..schemas import STAGE_LABELS
 from ..integrations import provider_status
 
 router = APIRouter(prefix='/api', tags=['Calendario e indicadores'])
@@ -24,7 +25,7 @@ def calendar(user=Depends(current_user), db=Depends(get_db, scope='function')):
         for task in db.scalars(select(Task).where(Task.case_id == case.id, Task.done_at.is_(None))):
             events.append({'id': f't{task.id}', 'case_id': case.id, 'type': 'Seguimiento', 'date': row(task)['due_at'], 'title': f'{label} · {task.title}', 'owner_id': task.owner_id})
         production = db.get(Production, case.id)
-        if production and not production.cancelled_at and production.stage != 'Entregado':
+        if production and not production.cancelled_at and delivery_status(db, case.id) != 'Completa':
             if production.scheduled_at: events.append({'id': f'p{case.id}', 'case_id': case.id, 'type': 'Producción', 'date': row(production)['scheduled_at'], 'title': label, 'owner_id': case.owner_id})
             if production.committed_date: events.append({'id': f'd{case.id}', 'case_id': case.id, 'type': 'Entrega', 'date': str(production.committed_date), 'title': label, 'original': str(production.original_committed_date)})
     return sorted(events, key=lambda e: e['date'])
@@ -43,7 +44,7 @@ def indicators(user=Depends(current_user), db=Depends(get_db, scope='function'))
     blocked = 0
     rework = 0
     for e in events:
-        if e.data.get('action') == 'stage': stages[e.data['from']] += e.data.get('seconds', 0)
+        if e.data.get('action') == 'stage': stages[STAGE_LABELS.get(e.data['from'], e.data['from'])] += e.data.get('seconds', 0)
         if e.data.get('action') == 'unblocked': blocked += e.data.get('seconds', 0)
         if e.data.get('rework') and e.data.get('action') == 'stage': rework += 1
     financial = defaultdict(lambda: {'delivered_pending': Decimal(0), 'overdue': Decimal(0)})
@@ -51,11 +52,12 @@ def indicators(user=Depends(current_user), db=Depends(get_db, scope='function'))
     for case in cases:
         production = db.get(Production, case.id)
         if not production: continue
-        if production.stage != 'Entregado' and not production.cancelled_at:
-            stages[production.stage] += (now() - production.stage_started_at).total_seconds()
+        delivery = delivery_status(db, case.id)
+        if delivery != 'Completa' and not production.cancelled_at and production.stage:
+            stages[STAGE_LABELS.get(production.stage, production.stage)] += (now() - production.stage_started_at).total_seconds()
         if production.blocked_since:
             blocked += ((production.cancelled_at or now()) - production.blocked_since).total_seconds()
-        if production.stage == 'Entregado':
+        if delivery == 'Completa':
             completed += 1
             delivery_dates = list(db.scalars(select(Delivery.delivered_at).where(Delivery.case_id == case.id)))
             ontime += bool(production.original_committed_date and delivery_dates and max(local_day(d) for d in delivery_dates) <= production.original_committed_date)

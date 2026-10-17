@@ -12,7 +12,7 @@ from app.config import settings
 if not settings.mysql_database.endswith('_test'):
     raise RuntimeError('Las pruebas requieren una base terminada en _test')
 from app.db import SessionLocal, engine, Base
-from app.models import User, Role
+from app.models import User
 from app.security import passwords
 from app.main import app
 from fastapi.testclient import TestClient

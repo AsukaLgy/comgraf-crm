@@ -1,48 +1,566 @@
-import {useState} from 'react'
-import {Link, useParams, useNavigate} from 'react-router-dom'
-import {useQuery, useQueryClient} from '@tanstack/react-query'
-import {ArrowLeft, Printer, Plus, Paperclip, Clock, UserRound, Check, MessageSquare} from 'lucide-react'
-import {api, can, date, money, quantity, toUTC, timezone, localDate} from './api'
-import {Badge, ErrorBox, Loading, Panel, Operation, FormDialog, Field, Empty} from './components'
-import ProductForm, {Specifications} from './ProductForm'
-import Composer from './Composer'
-import {PRODUCTION_STAGES, CASE_STATUSES, CASE_PRIORITIES, PRODUCTION_STAGE, HNL_CURRENCY} from './domain'
-const reason={name:'reason',label:'Motivo',type:'textarea',required:true}
+import { useState } from 'react'
+import { Link, useParams, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, Plus, Paperclip } from 'lucide-react'
+import { api, can, date, money, quantity, toUTC, timezone, localInput, uid } from './api'
+import { Badge, ErrorBox, Loading, Panel, Operation, FormDialog, Field, Empty } from './components'
+import ProductForm, { Specifications } from './ProductForm'
+import CaseAttention from './CaseAttention'
+import CaseActivity from './CaseActivity'
+import CasePrintSheet from './CasePrintSheet'
+import DeliveryFinance from './DeliveryFinance'
+import ProductionStages from './ProductionStages'
+import { HNL_CURRENCY } from './domain'
+const reason = { name: 'reason', label: 'Motivo', type: 'textarea', required: true }
 
-export default function CasePage({user,print=false}){
-  const {id}=useParams(),nav=useNavigate(),qc=useQueryClient(),[modal,setModal]=useState(null),[section,setSection]=useState('Actividad')
-  const query=useQuery({queryKey:['case',id],queryFn:()=>api('/cases/'+id)}), people=useQuery({queryKey:['users'],queryFn:()=>api('/users')})
-  if(query.isPending)return <Loading/>
-  if(query.error)return <ErrorBox error={query.error}/>
-  const c=query.data,p=c.production,users=people.data||[],close=()=>setModal(null)
-  const attention=can(user,'attention')&&(c.owner_id===user.id||can(user,'assign')),production=can(user,'production'),finance=can(user,'finance')
-  const person=id=>users.find(u=>u.id===id)?.name||'Sin asignar'
-  const personOptions=permission=>users.filter(u=>u.active&&can(u,permission)).map(u=>({value:u.id,label:u.name}))
-  const operation=(path,title,fields=[],initial={},transform,submit)=>setModal({type:'operation',path,title,fields,initial,transform,submit})
-  const assign=()=>operation('assign','Asignar caso',[{name:'owner_id',label:'Responsable principal',options:personOptions('attention'),empty:'Sin asignar'}],{owner_id:c.owner_id||''},v=>({...v,owner_id:v.owner_id?Number(v.owner_id):null}))
-  function attentionDialog(){operation('attention',c.status==='Cerrado'?'Reabrir atención':'Actualizar atención',[
-    {name:'status',label:'Estado de atención',options:CASE_STATUSES},{name:'priority',label:'Prioridad',options:CASE_PRIORITIES},{name:'next_action',label:'Próxima acción'},{name:'pending_message',label:'Mensaje pendiente de atención',type:'checkbox'}, {name:'reason',label:'Motivo de cierre o reapertura',type:'textarea',required:c.status==='Cerrado'},{name:'summary',label:'Resumen de cierre',type:'textarea',required:c.status!=='Cerrado'}],{status:c.status==='Cerrado'?'En atención':c.status,priority:c.priority,next_action:c.next_action,pending_message:c.pending_message})}
-  function schedule(){operation('production/schedule','Programar producción y compromiso',[{name:'scheduled_at',label:`Inicio programado (${timezone})`,type:'datetime-local',required:true},{name:'committed_date',label:'Fecha comprometida de entrega',type:'date',required:true}],{committed_date:p.committed_date||''},v=>({...v,scheduled_at:toUTC(v.scheduled_at)}))}
-  function delivery(){operation('deliveries','Registrar entrega',[
- {name:'item_id',label:'Partida',options:c.items.map(i=>({value:i.id,label:`${i.product} · ${quantity(i.quantity)} ${i.unit}`})),required:true,empty:'Seleccionar partida'},
-    {name:'quantity',label:'Cantidad entregada',type:'number',step:'0.001',min:'0.001',required:true},{name:'delivered_at',label:`Fecha y hora (${timezone})`,type:'datetime-local',required:true},{name:'receiver',label:'Recibido por',required:true},{name:'method',label:'Modalidad',required:true},{name:'evidence',label:'Evidencia / referencia del recibo',type:'textarea',required:true}],{method:p.delivery_method},v=>({...v,item_id:Number(v.item_id),delivered_at:toUTC(v.delivered_at)}))}
-  if(print)return <article className="print-sheet"><div className="print-actions"><button onClick={()=>window.print()}><Printer size={16}/>Imprimir / Guardar PDF</button><Link to={'/cases/'+id}>Volver al expediente</Link></div><header><div><div className="brand-name">COMGRAF</div><p>Comunicación Gráfica · Ficha de taller</p></div><h1>{c.number}</h1></header>{!p?<p>Este expediente está en Atención y no tiene ficha de producción.</p>:<><h2>{c.subject}</h2><p>Cliente: {c.client.name} · Responsable del caso: {person(c.owner_id)}</p><p>Compromiso: {date(p.committed_date)} · Etapa: {p.stage} {p.cancelled_at?' · CANCELADO':''}</p>{(p.specs_snapshot?.items||p.approved_snapshot?.items||c.items).map(i=><section key={i.id}><h3>{i.product} · {i.quantity} {i.unit}</h3><Specifications specs={i.specs}/></section>)}<h3>Instrucciones</h3><p className="prewrap">{p.instructions||'Sin instrucciones adicionales'}</p><h3>Archivos de referencia</h3>{c.attachments.map(a=><p key={a.id}><a href={'/api/attachments/'+a.id}>{a.name}</a> · Arte {a.art_version||'—'} · SHA256: <small>{a.sha256}</small></p>)}<p>Modalidad de entrega: {p.delivery_method}</p></>}</article>
-  return <>
-    <button className="back-link" onClick={()=>nav(-1)}><ArrowLeft size={16}/>Volver a la bandeja</button>
-    <section className="case-heading"><div><div className="eyebrow">EXPEDIENTE {c.number} <Badge tone={p?'teal':''}>{c.mode}</Badge></div><h1>{c.subject}</h1><div className="case-meta"><span>{c.client.name}</span><span>· Responsable: {person(c.owner_id)}</span><span>· {c.kind}</span><span>· {c.channel}</span><span>· {date(c.created_at)}</span></div></div><div className="actions">{!c.owner_id&&can(user,'attention')&&c.status!=='Cerrado'&&<button className="primary" onClick={()=>operation('take','Tomar caso',[],{},undefined,'Tomar caso')}><UserRound size={15}/>Tomar caso</button>}{can(user,'assign')&&<button onClick={assign}>Asignar caso</button>}{attention&&!p&&c.status!=='Cerrado'&&<button className="primary" onClick={()=>setModal({type:'convert'})}><Plus size={16}/>Generar orden de producción</button>}{attention&&<button onClick={attentionDialog}>{c.status==='Cerrado'?'Reabrir atención':'Estado / Cerrar atención'}</button>}{p&&<Link className="button" to={`/cases/${id}/print`}><Printer size={16}/>Ficha de taller</Link>}</div></section>
-    <div className="status-strip"><Badge>{c.status}</Badge><Badge tone={c.priority==='Urgente'?'red':''}>{c.priority}</Badge><span>Atención: <strong>{person(c.owner_id)}</strong></span>{p&&<><span>Entrega: <strong>{c.delivery_status}</strong></span>{c.payment_status&&<span>Pago: <Badge tone={c.payment_status==='Vencido'?'red':''}>{c.payment_status}</Badge></span>}</>}{c.related_case_id&&<Link to={'/cases/'+c.related_case_id}>Caso relacionado</Link>}<span className="muted">Revisión {c.version}</span><button className="text-button" onClick={()=>query.refetch()}>Actualizar</button></div>
-    {p&&<section className="production-path"><ol aria-label="Etapas de producción">{PRODUCTION_STAGES.map((s,i)=><li key={s} className={s===p.stage?'current':i<PRODUCTION_STAGES.indexOf(p.stage)?'done':''}><span>{i<PRODUCTION_STAGES.indexOf(p.stage)?<Check size={13}/>:i+1}</span>{s}</li>)}</ol>{p.cancelled_at?<div className="error">Producción cancelada · Los pagos y entregas permanecen registrados.</div>:<div className="production-controls"><span>{p.blocked_since&&<Badge tone="red">Bloqueado: {p.block_reason}</Badge>}</span>{production&&<div className="actions"><button onClick={schedule}>Programar</button><button onClick={()=>operation('production/stage','Cambiar etapa',[{name:'stage',label:'Nueva etapa',options:PRODUCTION_STAGES.filter(s=>s!==PRODUCTION_STAGE.DELIVERED)},{...reason,required:false}],{stage:PRODUCTION_STAGES[Math.min(PRODUCTION_STAGES.indexOf(p.stage)+1,4)]})}>Cambiar etapa</button><button onClick={()=>operation('production/'+(p.blocked_since?'unblock':'block'),p.blocked_since?'Resolver bloqueo':'Bloquear trabajo',[reason])}>{p.blocked_since?'Resolver bloqueo':'Bloquear'}</button></div>}</div>}</section>}
-    <div className="case-grid"><div className="case-main"><div className="tabs section-tabs">{['Actividad','Cotizaciones',...(p?['Producción','Entregas y cobros']:[]),'Archivos'].map(s=><button className={section===s?'active':''} key={s} onClick={()=>setSection(s)}>{s}{s==='Archivos'&&<span>{c.attachments.length}</span>}</button>)}</div>
-    {section==='Actividad'&&<Panel title="Bitácora y comunicación" action={<Badge>{c.events.length} eventos</Badge>}>{attention?<Composer key={c.id} record={c} user={user}/>:<div className="notice">Orden activa en Preparación. Las especificaciones capturadas al generar se conservan como referencia histórica.</div>}{c.events.length?<ol className="timeline">{[...c.events].reverse().map(e=><li key={e.id} className={e.kind==='Sistema'?'system':''}><span className="timeline-icon">{e.kind==='Sistema'?<Clock size={14}/>:<MessageSquare size={14}/>}</span><div><div className="event-meta"><strong>{e.kind}</strong><span>{e.channel!=='Sistema'&&e.channel}</span><span>{person(e.actor_id)}</span><time>{date(e.created_at)}</time></div><p>{e.body}</p>{e.data.direction&&<small>{e.data.direction} · Registro manual</small>}</div></li>)}</ol>:<Empty/>}</Panel>}
-    {section==='Cotizaciones'&&<Panel title="Cotizaciones y versiones" action={attention&&<button onClick={()=>setModal({type:'quote'})}><Plus size={15}/>Nueva versión</button>}>{c.quotes.length?c.quotes.map(q=><article className="quote" key={q.id}><div className="section-line"><h3>Versión {q.version} <Badge tone={q.status==='Aceptada'?'teal':''}>{q.status}</Badge></h3><strong>{money(q.total,q.currency)}</strong></div><p className="muted">Vigencia: {date(q.valid_until)} · {q.items.length} partidas</p>{q.items.map((i,n)=><details key={n}><summary>{i.product} · {quantity(i.quantity)} {i.unit} · {money(i.unit_price,q.currency)} / unidad</summary><Specifications specs={i.specs}/></details>)}{q.decision_evidence&&<p>{q.decision_evidence}</p>}<div className="actions">{attention&&<button onClick={()=>setModal({type:'quote',source:q})}>Revisar en nueva versión</button>}{attention&&q.status==='Pendiente'&&<button onClick={()=>operation(`quotes/${q.id}/decision`,'Registrar decisión de cotización',[{name:'status',label:'Decisión',options:['Aceptada','Rechazada']},{name:'evidence',label:'Evidencia / comunicación del cliente',type:'textarea',required:true}],{status:'Aceptada'})}>Registrar decisión</button>}{attention&&!p&&q.status==='Aceptada'&&q.currency==='HNL'&&<button className="primary" onClick={()=>setModal({type:'convert',source:q})}>Generar orden con esta versión</button>}</div></article>):<Empty>Aún no hay cotizaciones. Puedes cotizar en lempiras sin iniciar fabricación.</Empty>}</Panel>}
-    {section==='Producción'&&p&&<Panel title="Especificaciones de producción"><div className="notice">Orden activa en Preparación. Las especificaciones capturadas al generar se conservan como referencia histórica.</div>{c.items.map(i=><article className="quote" key={i.id}><div className="section-line"><h3>{i.product}</h3></div><p>{quantity(i.quantity)} {i.unit}{i.unit_price!==undefined&&' · '+money(i.unit_price,p.currency)+' / unidad'}</p><Specifications specs={i.specs}/></article>)}<h3>Instrucciones</h3><p className="prewrap">{p.instructions||'Sin instrucciones adicionales'}</p>{can(user,'assign')&&!p.cancelled_at&&<button className="danger" onClick={()=>operation('production/cancel','Cancelar producción',[reason])}>Cancelar producción con motivo</button>}</Panel>}
-    {section==='Entregas y cobros'&&p&&<Panel title="Entregas y cobros" action={<div className="actions">{production&&p.stage==='Listo para entregar'&&!p.blocked_since&&!p.cancelled_at&&<button onClick={delivery}><Plus size={15}/>Registrar entrega</button>}{finance&&!p.cancelled_at&&p.currency===HNL_CURRENCY&&<button className="primary" onClick={()=>operation('payments','Registrar abono',[{name:'kind',label:'Tipo',options:['Anticipo','Abono']},{name:'amount',label:`Importe (${HNL_CURRENCY})`,type:'number',min:'0.01',step:'0.01',required:true},{name:'reference',label:'Referencia / comprobante',required:true}],{kind:'Abono'})}>Registrar abono</button>}{can(user,'adjust')&&!p.cancelled_at&&p.currency===HNL_CURRENCY&&<button onClick={()=>operation('adjustments','Ajuste autorizado',[{name:'amount',label:`Importe (${HNL_CURRENCY}): positivo aumenta saldo, negativo lo reduce`,type:'number',step:'0.01',required:true},{name:'due_date',label:'Vencimiento del ajuste',type:'date',required:true},{name:'reason',label:'Motivo',type:'textarea',required:true}],{due_date:localDate()})}>Ajuste</button>}</div>}>{finance ? <div className="finance-summary"><div><small>Precio de la orden</small><strong>{money(p.price,p.currency)}</strong></div><div><small>Saldo pendiente</small><strong>{money(c.balance,p.currency)}</strong></div><div><small>Saldo vencido</small><strong>{money(c.overdue_balance,p.currency)}</strong></div><div><small>Situación de pago</small><Badge tone={c.payment_status==='Vencido'?'red':c.payment_status==='Pagado'?'teal':''}>{c.payment_status||'Sin saldo registrado'}</Badge></div></div> : <p className="notice">Importes restringidos al rol de Cobranza.</p>}{finance&&p.currency!==HNL_CURRENCY&&<p className="notice">Orden histórica en USD. Se conserva su moneda original y no se admiten nuevos pagos HNL.</p>}<h3>Entregas</h3>{c.deliveries?.length?<div className="table-wrap"><table className="case-table"><thead><tr><th>Fecha</th><th>Partida</th><th>Cantidad</th><th>Recibe</th><th>Modalidad</th><th>Evidencia</th></tr></thead><tbody>{c.deliveries.map(d=><tr key={d.id}><td>{date(d.delivered_at)}</td><td>{c.items.find(i=>i.id===d.item_id)?.product||'Partida'}</td><td>{quantity(d.quantity)}</td><td>{d.receiver}</td><td>{d.method}</td><td>{d.evidence}</td></tr>)}</tbody></table></div>:<Empty>Aún no hay entregas registradas.</Empty>}<h3>Movimientos de saldo</h3>{c.ledger?.length?<div className="table-wrap"><table className="case-table"><thead><tr><th>Fecha</th><th>Tipo</th><th>Importe</th><th>Vencimiento</th><th>Referencia / motivo</th><th></th></tr></thead><tbody>{c.ledger.map(e=><tr key={e.id}><td>{date(e.created_at)}</td><td>{e.kind}</td><td>{money(e.amount,p.currency)}</td><td>{date(e.due_date)}</td><td>{e.reason||e.reference}</td><td>{can(user,'adjust')&&['Anticipo','Abono'].includes(e.kind)&&!c.ledger.some(x=>x.reverses_id===e.id)&&<button onClick={()=>operation(`payments/${e.id}/reverse`,'Revertir pago registrado',[{name:'reason',label:'Motivo de reversión',type:'textarea',required:true}])}>Revertir con trazabilidad</button>}</td></tr>)}</tbody></table></div>:<Empty>No hay abonos ni ajustes registrados.</Empty>}<p className="muted">Control operativo de cobros; no sustituye un sistema contable o fiscal.</p></Panel>}
-    {section==='Archivos'&&<Panel title="Archivos del expediente" action={(attention||(production&&p))&&<button onClick={()=>setModal({type:'upload'})}><Paperclip size={15}/>Adjuntar archivo</button>}><p className="muted">PDF, PNG, JPG o TXT · hasta 20 MB por archivo. Los artes se vinculan a una versión.</p>{c.attachments.map(a=><div className="attachment" key={a.id}><Paperclip size={18}/><div><a href={'/api/attachments/'+a.id}>{a.name}</a><small>Versión del arte: {a.art_version||'Sin versión'} · {(a.size/1024).toFixed(1)} KB · {date(a.created_at)}</small></div></div>)}{!c.attachments.length&&<Empty>No hay archivos adjuntos.</Empty>}</Panel>}
-    </div><aside className="case-aside"><Panel title="Cliente"><div className="client-avatar">{c.client.name.slice(0,2).toUpperCase()}</div><h3>{can(user,'clients')?<Link to={'/clients/'+c.client.id}>{c.client.name}</Link>:c.client.name}</h3><p className="muted">{c.client.company||'Cliente particular'}{c.client.provisional?' · Provisional':''}</p>{c.client.rtn&&<p>RTN {c.client.rtn}</p>}{c.client.phones.map(p=><p key={p}>{p}</p>)}{c.client.emails.map(e=><p key={e}>{e}</p>)}{c.client.addresses.map(a=><p key={a}>{a}</p>)}{c.description&&<><hr/><p className="prewrap">{c.description}</p></>}</Panel>
+export default function CasePage({ user, print = false }) {
+  const { id } = useParams(),
+    nav = useNavigate(),
+    qc = useQueryClient(),
+    [modal, setModal] = useState(null),
+    [section, setSection] = useState('Actividad'),
+    [attentionError, setAttentionError] = useState(null),
+    [attentionBusy, setAttentionBusy] = useState(false)
+  const query = useQuery({ queryKey: ['case', id], queryFn: () => api('/cases/' + id) }),
+    people = useQuery({ queryKey: ['users'], queryFn: () => api('/users') })
+  if (query.isPending) return <Loading />
+  if (query.error) return <ErrorBox error={query.error} />
+  const c = query.data,
+    p = c.production,
+    users = people.data || [],
+    close = () => setModal(null)
+  const attention = can(user, 'attention') && (c.owner_id === user.id || can(user, 'assign')),
+    production = can(user, 'production'),
+    finance = can(user, 'finance')
+  const person = (id) => users.find((u) => u.id === id)?.name || 'Sin asignar'
+  const personOptions = (permission) =>
+    users.filter((u) => u.active && can(u, permission)).map((u) => ({ value: u.id, label: u.name }))
+  const operation = (path, title, fields = [], initial = {}, transform, submit, method = 'POST') =>
+    setModal({ type: 'operation', path, title, fields, initial, transform, submit, method })
+  const assign = () =>
+    operation(
+      'assign',
+      'Asignar caso',
+      [
+        {
+          name: 'owner_id',
+          label: 'Responsable principal',
+          options: personOptions('attention'),
+          empty: 'Sin asignar',
+        },
+      ],
+      { owner_id: c.owner_id || '' },
+      (v) => ({ ...v, owner_id: v.owner_id ? Number(v.owner_id) : null }),
+    )
+  async function toggleAttention() {
+    if (attentionBusy) return
+    setAttentionBusy(true)
+    setAttentionError(null)
+    try {
+      const result = await api('/cases/' + c.id + '/attention', {
+        method: 'POST',
+        body: {
+          status: c.status === 'Cerrado' ? 'Abierto' : 'Cerrado',
+          version: c.version,
+          key: uid(),
+        },
+      })
+      qc.setQueryData(['case', String(c.id)], result)
+      await qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'case' })
+    } catch (error) {
+      setAttentionError(error)
+      if (error.status === 409) await query.refetch()
+    } finally {
+      setAttentionBusy(false)
+    }
+  }
+  function schedule() {
+    operation(
+      'production/schedule',
+      'Programar producción y compromiso',
+      [
+        {
+          name: 'scheduled_at',
+          label: `Inicio programado (${timezone})`,
+          type: 'datetime-local',
+          required: true,
+        },
+        {
+          name: 'committed_date',
+          label: 'Fecha comprometida de entrega',
+          type: 'date',
+          required: true,
+        },
+      ],
+      { committed_date: p.committed_date || '' },
+      (v) => ({ ...v, scheduled_at: toUTC(v.scheduled_at) }),
+    )
+  }
+  function delivery() {
+    operation(
+      'deliveries',
+      'Registrar entrega',
+      [
+        {
+          name: 'item_id',
+          label: 'Partida',
+          options: c.items.map((i) => ({
+            value: i.id,
+            label: `${i.product} · ${quantity(i.quantity)} ${i.unit}`,
+          })),
+          required: true,
+          empty: 'Seleccionar partida',
+        },
+        {
+          name: 'quantity',
+          label: 'Cantidad entregada',
+          type: 'number',
+          step: '0.001',
+          min: '0.001',
+          required: true,
+        },
+        {
+          name: 'delivered_at',
+          label: `Fecha y hora (${timezone})`,
+          type: 'datetime-local',
+          required: true,
+        },
+        { name: 'receiver', label: 'Recibido por', required: true },
+        { name: 'method', label: 'Modalidad', required: true },
+        {
+          name: 'evidence',
+          label: 'Evidencia / referencia del recibo',
+          type: 'textarea',
+          required: true,
+        },
+        ...(finance && p.currency === HNL_CURRENCY
+          ? [
+              { name: 'payment_now', label: 'Registrar pago con esta entrega', type: 'checkbox' },
+              {
+                name: 'payment_amount',
+                label: `Abono o liquidación (${HNL_CURRENCY}) · saldo actual ${money(c.balance, p.currency)}`,
+                type: 'number',
+                min: '0.01',
+                step: '0.01',
+                required: true,
+                when: (v) => v.payment_now,
+              },
+              {
+                name: 'payment_reference',
+                label: 'Referencia del pago',
+                required: true,
+                when: (v) => v.payment_now,
+              },
+            ]
+          : []),
+      ],
+      {
+        method: p.delivery_method,
+        payment_now: false,
+        payment_amount: c.balance > 0 ? c.balance : '',
+      },
+      (v) => {
+        const { payment_now, ...delivery } = v
+        return {
+          ...delivery,
+          item_id: Number(v.item_id),
+          delivered_at: toUTC(v.delivered_at),
+          payment_amount: payment_now ? v.payment_amount : null,
+          payment_reference: payment_now ? v.payment_reference : null,
+        }
+      },
+    )
+  }
+  if (print) return <CasePrintSheet id={id} record={c} person={person} />
+  return (
+    <>
+      <button className="back-link" onClick={() => nav(-1)}>
+        <ArrowLeft size={16} />
+        Volver a la bandeja
+      </button>
+      <CaseAttention
+        record={c}
+        person={person}
+        canAttend={attention}
+        canAssign={can(user, 'assign')}
+        onTake={() => operation('take', 'Tomar caso', [], {}, undefined, 'Tomar caso')}
+        onAssign={assign}
+        onConvert={() => setModal({ type: 'convert' })}
+        onToggle={toggleAttention}
+        attentionError={attentionError}
+        attentionBusy={attentionBusy}
+        onRefresh={() => query.refetch()}
+      />
+      {p && (
+        <ProductionStages
+          record={c}
+          canManage={production}
+          onSchedule={schedule}
+          operation={operation}
+        />
+      )}
+      <div className="case-grid">
+        <div className="case-main">
+          <div className="tabs section-tabs">
+            {[
+              'Actividad',
+              'Cotizaciones',
+              ...(p ? ['Producción', 'Entregas y cobros'] : []),
+              'Archivos',
+            ].map((s) => (
+              <button
+                className={section === s ? 'active' : ''}
+                key={s}
+                onClick={() => setSection(s)}
+              >
+                {s}
+                {s === 'Archivos' && <span>{c.attachments.length}</span>}
+              </button>
+            ))}
+          </div>
+          {section === 'Actividad' && (
+            <CaseActivity record={c} attention={attention} user={user} person={person} />
+          )}
+          {section === 'Cotizaciones' && (
+            <Panel
+              title="Cotizaciones y versiones"
+              action={
+                attention && (
+                  <button onClick={() => setModal({ type: 'quote' })}>
+                    <Plus size={15} />
+                    Nueva versión
+                  </button>
+                )
+              }
+            >
+              {c.quotes.length ? (
+                c.quotes.map((q) => (
+                  <article className="quote" key={q.id}>
+                    <div className="section-line">
+                      <h3>
+                        Versión {q.version}{' '}
+                        <Badge tone={q.status === 'Aceptada' ? 'teal' : ''}>{q.status}</Badge>
+                      </h3>
+                      <strong>{money(q.total, q.currency)}</strong>
+                    </div>
+                    <p className="muted">
+                      Vigencia: {date(q.valid_until)} · {q.items.length} partidas
+                    </p>
+                    {q.items.map((i, n) => (
+                      <details key={n}>
+                        <summary>
+                          {i.product} · {quantity(i.quantity)} {i.unit} ·{' '}
+                          {money(i.unit_price, q.currency)} / unidad
+                        </summary>
+                        <Specifications specs={i.specs} />
+                      </details>
+                    ))}
+                    {q.decision_evidence && <p>{q.decision_evidence}</p>}
+                    <div className="actions">
+                      {attention && (
+                        <button onClick={() => setModal({ type: 'quote', source: q })}>
+                          Revisar en nueva versión
+                        </button>
+                      )}
+                      {attention && q.status === 'Pendiente' && (
+                        <button
+                          onClick={() =>
+                            operation(
+                              `quotes/${q.id}/decision`,
+                              'Registrar decisión de cotización',
+                              [
+                                {
+                                  name: 'status',
+                                  label: 'Decisión',
+                                  options: ['Aceptada', 'Rechazada'],
+                                },
+                                {
+                                  name: 'evidence',
+                                  label: 'Evidencia / comunicación del cliente',
+                                  type: 'textarea',
+                                  required: true,
+                                },
+                              ],
+                              { status: 'Aceptada' },
+                            )
+                          }
+                        >
+                          Registrar decisión
+                        </button>
+                      )}
+                      {attention && !p && q.status === 'Aceptada' && q.currency === 'HNL' && (
+                        <button
+                          className="primary"
+                          onClick={() => setModal({ type: 'convert', source: q })}
+                        >
+                          Generar orden con esta versión
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <Empty>
+                  Aún no hay cotizaciones. Puedes cotizar en lempiras sin iniciar fabricación.
+                </Empty>
+              )}
+            </Panel>
+          )}
+          {section === 'Producción' && p && (
+            <Panel title="Especificaciones de producción">
+              <div className="notice">
+                Etapa actual: {p.stage_label || 'Pendiente de clasificación'}. Las especificaciones
+                capturadas al generar se conservan como referencia histórica.
+              </div>
+              {c.items.map((i) => (
+                <article className="quote" key={i.id}>
+                  <div className="section-line">
+                    <h3>{i.product}</h3>
+                  </div>
+                  <p>
+                    {quantity(i.quantity)} {i.unit}
+                    {i.unit_price !== undefined &&
+                      ' · ' + money(i.unit_price, p.currency) + ' / unidad'}
+                  </p>
+                  <Specifications specs={i.specs} />
+                </article>
+              ))}
+              <h3>Instrucciones</h3>
+              <p className="prewrap">{p.instructions || 'Sin instrucciones adicionales'}</p>
+              {can(user, 'assign') && !p.cancelled_at && c.delivery_status !== 'Completa' && (
+                <button
+                  className="danger"
+                  onClick={() => operation('production/cancel', 'Anular trabajo', [reason])}
+                >
+                  Anular trabajo con motivo
+                </button>
+              )}
+            </Panel>
+          )}
+          {section === 'Entregas y cobros' && p && (
+            <DeliveryFinance
+              record={c}
+              user={user}
+              finance={finance}
+              canProduce={production}
+              onOperation={operation}
+              onDelivery={delivery}
+            />
+          )}
+          {section === 'Archivos' && (
+            <Panel
+              title="Archivos del expediente"
+              action={
+                (attention || (production && p)) && (
+                  <button onClick={() => setModal({ type: 'upload' })}>
+                    <Paperclip size={15} />
+                    Adjuntar archivo
+                  </button>
+                )
+              }
+            >
+              <p className="muted">
+                PDF, PNG, JPG o TXT · hasta 20 MB por archivo. Los artes se vinculan a una versión.
+              </p>
+              {c.attachments.map((a) => (
+                <div className="attachment" key={a.id}>
+                  <Paperclip size={18} />
+                  <div>
+                    <a href={'/api/attachments/' + a.id}>{a.name}</a>
+                    <small>
+                      Versión del arte: {a.art_version || 'Sin versión'} ·{' '}
+                      {(a.size / 1024).toFixed(1)} KB · {date(a.created_at)}
+                    </small>
+                  </div>
+                </div>
+              ))}
+              {!c.attachments.length && <Empty>No hay archivos adjuntos.</Empty>}
+            </Panel>
+          )}
+        </div>
+        <aside className="case-aside">
+          <Panel title="Cliente">
+            <div className="client-avatar">{c.client.name.slice(0, 2).toUpperCase()}</div>
+            <h3>
+              {can(user, 'clients') ? (
+                <Link to={'/clients/' + c.client.id}>{c.client.name}</Link>
+              ) : (
+                c.client.name
+              )}
+            </h3>
+            <p className="muted">
+              {c.client.company || 'Cliente particular'}
+              {c.client.provisional ? ' · Provisional' : ''}
+            </p>
+            {c.client.rtn && <p>RTN {c.client.rtn}</p>}
+            {c.client.phones.map((p) => (
+              <p key={p}>{p}</p>
+            ))}
+            {c.client.emails.map((e) => (
+              <p key={e}>{e}</p>
+            ))}
+            {c.client.addresses.map((a) => (
+              <p key={a}>{a}</p>
+            ))}
+            {c.description && (
+              <>
+                <hr />
+                <p className="prewrap">{c.description}</p>
+              </>
+            )}
+          </Panel>
 
-    <Panel title="Próxima acción" action={attention&&<button className="icon-button" aria-label="Programar seguimiento" onClick={()=>operation('tasks','Programar seguimiento',[{name:'title',label:'Acción a realizar',required:true},{name:'owner_id',label:'Responsable',options:personOptions('attention'),required:true},{name:'due_at',label:`Fecha y hora (${timezone})`,type:'datetime-local',required:true}],{owner_id:user.id},v=>({...v,owner_id:Number(v.owner_id),due_at:toUTC(v.due_at)}))}><Plus size={16}/></button>}><p>{c.next_action||'Sin próxima acción definida'}</p>{c.tasks.map(t=><div className="task" key={t.id}><strong>{t.title}</strong><small>{date(t.due_at)} · {person(t.owner_id)}</small>{t.done_at?<Badge tone="teal">Completado</Badge>:<>{new Date(t.due_at)<new Date()&&<Badge tone="red">Vencido</Badge>}{attention&&<button onClick={()=>operation(`tasks/${t.id}/complete`,'Completar seguimiento')}>Completar</button>}</>}</div>)}</Panel>
-    {p&&<Panel title="Compromisos"><dl className="key-values"><dt>Fecha solicitada</dt><dd>{date(p.requested_date)}</dd><dt>Compromiso original</dt><dd>{date(p.original_committed_date)}</dd><dt>Compromiso actual</dt><dd>{date(p.committed_date)}</dd><dt>Programación</dt><dd>{date(p.scheduled_at)}</dd><dt>Entrega</dt><dd>{p.delivery_method}</dd></dl></Panel>}{c.status==='Cerrado'&&<Panel title="Cierre de atención"><p>{c.close_reason}</p><p>{c.close_summary}</p><small>{date(c.closed_at)}</small></Panel>}</aside></div>
-    {modal?.type==='operation'&&<Operation {...modal} record={c} onClose={close}/>} {(modal?.type==='quote'||modal?.type==='convert')&&<ProductForm record={c} quote={modal.type==='quote'} source={modal.source} onClose={close}/>}
-    {modal?.type==='upload'&&<FormDialog title="Adjuntar archivo" initial={{file:null,art_version:''}} onClose={close} onSave={async v=>{const form=new FormData();form.append('file',v.file);form.append('art_version',v.art_version);await api(`/cases/${id}/attachments`,{method:'POST',body:form});await qc.invalidateQueries({queryKey:['case',id]})}} render={(v,set)=><><Field label="Archivo" required type="file" accept=".pdf,.png,.jpg,.jpeg,.txt" onChange={e=>set('file',e.target.files[0])}/><Field label="Versión del arte" placeholder="Ej. v1" value={v.art_version} onChange={e=>set('art_version',e.target.value)}/></>}/>}
-  </>
+          <Panel
+            title="Próxima acción"
+            action={
+              attention && (
+                <button
+                  className="icon-button"
+                  aria-label="Programar seguimiento"
+                  onClick={() =>
+                    operation(
+                      'tasks',
+                      'Programar seguimiento',
+                      [
+                        { name: 'title', label: 'Acción a realizar', required: true },
+                        {
+                          name: 'owner_id',
+                          label: 'Responsable',
+                          options: personOptions('attention'),
+                          required: true,
+                        },
+                        {
+                          name: 'due_at',
+                          label: `Fecha y hora (${timezone})`,
+                          type: 'datetime-local',
+                          required: true,
+                        },
+                      ],
+                      { owner_id: user.id },
+                      (v) => ({ ...v, owner_id: Number(v.owner_id), due_at: toUTC(v.due_at) }),
+                    )
+                  }
+                >
+                  <Plus size={16} />
+                </button>
+              )
+            }
+          >
+            <p>{c.next_action || 'Sin próxima acción definida'}</p>
+            {c.tasks.map((t) => (
+              <div className="task" key={t.id}>
+                <strong>{t.title}</strong>
+                <small>
+                  {date(t.due_at)} · {person(t.owner_id)}
+                </small>
+                {t.done_at ? (
+                  <Badge tone="teal">Completado</Badge>
+                ) : (
+                  <>
+                    {new Date(t.due_at) < new Date() && <Badge tone="red">Vencido</Badge>}
+                    {attention && (
+                      <>
+                        <button
+                          onClick={() =>
+                            operation(`tasks/${t.id}/complete`, 'Completar seguimiento')
+                          }
+                        >
+                          Completar
+                        </button>
+                        <button
+                          onClick={() =>
+                            operation(
+                              `tasks/${t.id}`,
+                              'Reprogramar seguimiento',
+                              [
+                                {
+                                  name: 'due_at',
+                                  label: `Nueva fecha y hora (${timezone})`,
+                                  type: 'datetime-local',
+                                  required: true,
+                                },
+                              ],
+                              { due_at: localInput(t.due_at) },
+                              (v) => ({ due_at: toUTC(v.due_at) }),
+                              undefined,
+                              'PUT',
+                            )
+                          }
+                        >
+                          Reprogramar
+                        </button>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            ))}
+          </Panel>
+          {p && (
+            <Panel title="Compromisos">
+              <dl className="key-values">
+                <dt>Fecha solicitada</dt>
+                <dd>{date(p.requested_date)}</dd>
+                <dt>Compromiso original</dt>
+                <dd>{date(p.original_committed_date)}</dd>
+                <dt>Compromiso actual</dt>
+                <dd>{date(p.committed_date)}</dd>
+                <dt>Programación</dt>
+                <dd>{date(p.scheduled_at)}</dd>
+                <dt>Entrega</dt>
+                <dd>{p.delivery_method}</dd>
+              </dl>
+            </Panel>
+          )}
+          {c.status === 'Cerrado' && (
+            <Panel title="Cierre de atención">
+              <p>{c.close_reason}</p>
+              <p>{c.close_summary}</p>
+              <small>{date(c.closed_at)}</small>
+            </Panel>
+          )}
+        </aside>
+      </div>
+      {modal?.type === 'operation' && <Operation {...modal} record={c} onClose={close} />}{' '}
+      {(modal?.type === 'quote' || modal?.type === 'convert') && (
+        <ProductForm
+          record={c}
+          quote={modal.type === 'quote'}
+          source={modal.source}
+          onClose={close}
+        />
+      )}
+      {modal?.type === 'upload' && (
+        <FormDialog
+          title="Adjuntar archivo"
+          initial={{ file: null, art_version: '' }}
+          onClose={close}
+          onSave={async (v) => {
+            const form = new FormData()
+            form.append('file', v.file)
+            form.append('art_version', v.art_version)
+            await api(`/cases/${id}/attachments`, { method: 'POST', body: form })
+            await qc.invalidateQueries({ queryKey: ['case', id] })
+          }}
+          render={(v, set) => (
+            <>
+              <Field
+                label="Archivo"
+                required
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg,.txt"
+                onChange={(e) => set('file', e.target.files[0])}
+              />
+              <Field
+                label="Versión del arte"
+                placeholder="Ej. v1"
+                value={v.art_version}
+                onChange={(e) => set('art_version', e.target.value)}
+              />
+            </>
+          )}
+        />
+      )}
+    </>
+  )
 }

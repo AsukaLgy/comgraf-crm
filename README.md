@@ -89,12 +89,12 @@ Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vit
 ## Recorrido de trabajo
 
 1. Crear cliente provisional (basta un nombre); agregar contactos y datos comerciales cuando se conozcan.
-2. Crear caso y tomarlo desde el pool. Registrar notas, visitas, llamadas o conversaciones externas; programar seguimientos. Una consulta se cierra con motivo y resumen sin generar producción.
+2. Crear caso y tomarlo desde el pool. Registrar notas, visitas, llamadas o conversaciones externas; programar seguimientos. Cerrar atención retira el caso de acción inmediata, pero no cierra trabajo ni cobranza: «Cerrar atención retira el caso de pendientes inmediatos; el trabajo y sus cobros continúan».
 3. Preparar cotización con partidas y vigencia. Registrar aceptación/rechazo de una versión. Generar orden reutiliza esa versión y conserva el expediente.
-4. Generar orden activa el mismo expediente en Preparación. Capturar partidas, precios en HNL, fechas, condición Contado o Crédito y entrega; la orden puede avanzar sin autorización separada.
-5. Programar el inicio y compromiso de entrega; el evento conserva fechas anteriores y nuevas, usuario y hora. Avanzar solo por las etapas principales; bloqueos y retrocesos requieren motivo. Acceder a Ficha de taller para imprimir o guardar PDF.
-6. Registrar cantidades entregadas por partida y evidencia. Una entrega parcial conserva pendientes; solo la entrega completa marca Entregado.
-7. Registrar anticipos/abonos; corregir mediante reversión o ajuste autorizado. Cerrar atención no elimina el saldo ni oculta el caso de cobranza.
+4. Generar orden activa el mismo expediente en Nuevo. Avanzar por Nuevo → Aprobación → Impresión → Taller → Listo para entregar. Aprobación es revisión operativa con el cliente, sin autorización interna separada.
+5. Programar el inicio y compromiso de entrega de forma independiente; el evento conserva fechas anteriores y nuevas, usuario y hora. El avance normal no exige motivo; bloqueos y retrocesos sí.
+6. Registrar cantidades entregadas por partida y evidencia. Una entrega parcial conserva pendientes; solo las cantidades completas muestran Entregado y detienen el tiempo activo.
+7. Registrar anticipos/abonos; corregir mediante reversión o ajuste autorizado. La entrega permite, con permiso financiero, incluir un abono en la misma operación o liquidar el saldo mostrado; entregar nunca crea un pago. Los saldos siguen visibles con atención cerrada.
 
 Correo/WhatsApp muestran **No configurado**. Se guardan borradores y se registran interacciones manuales; no hay envíos simulados. Los borradores se guardan por caso/canal/usuario en MySQL; el navegador conserva un respaldo provisional durante la escritura. Los expedientes y saldos nunca dependen de localStorage.
 
@@ -177,3 +177,5 @@ Control operativo de cobros; no reemplaza contabilidad ni un sistema fiscal. No 
 Las migraciones se aplican en orden con `alembic upgrade head`; la migración 002 normaliza únicamente equivalencias inequívocas de Contado/Crédito y agrega la instantánea de especificaciones. No altera importes, saldos, pagos ni fechas históricas.
 
 Las nuevas operaciones se registran en HNL. Los importes históricos en USD se conservan, sin conversión automática; una cotización antigua en USD debe revisarse con precios HNL antes de generar una orden.
+
+Las migraciones 003/004 incorporan el flujo de atención y producción descrito en [ARQUITECTURA](docs/ARQUITECTURA.md) y vuelven a abrir atenciones que ya tenían seguimientos vencidos. Antes de actualizar, respalda la base y adjuntos; aplica con `alembic upgrade head` (Compose lo hace al arrancar). Preparación y Listo para entregar se clasifican inequívocamente en Nuevo y Listo. Etapas intermedias ambiguas conservan el original en `legacy_stage`, quedan pendientes de clasificación manual y no reciben tiempos históricos inventados. Las migraciones no eliminan expedientes, entregas ni pagos. Sus downgrades se rechazan porque restaurar estados anteriores exigiría adivinar: para volver atrás restaura conjuntamente el respaldo de base y archivos.

@@ -3,8 +3,8 @@ from sqlalchemy import select
 from ..db import get_db
 from ..models import Case, Client, Contact, Draft, SavedView
 from .. import schemas as s, services as service
-from ..security import current_user, require, can
-from ..repository import row, get_case, case_detail, cases_list
+from ..security import current_user, require
+from ..repository import row, get_case, case_detail, cases_list, case_counts
 from .common import case_response
 
 router = APIRouter(prefix='/api', tags=['Expedientes'])
@@ -12,15 +12,12 @@ router = APIRouter(prefix='/api', tags=['Expedientes'])
 
 @router.get('/cases')
 def list_cases(request: Request, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    items = cases_list(db, user, dict(request.query_params))
-    return {'items': items, 'total': len(items)}
+    return cases_list(db, user, dict(request.query_params))
 
 
 @router.get('/counts')
 def counts(user=Depends(current_user), db=Depends(get_db, scope='function')):
-    views = ['pool', 'action', 'mine', 'production', 'ready', 'history']
-    if can(db, user, 'attention') or can(db, user, 'finance'): views += ['balances', 'overdue']
-    return {view: len(cases_list(db, user, {'view': view})) for view in views}
+    return case_counts(db, user)
 
 
 @router.post('/cases', status_code=201)
@@ -73,6 +70,11 @@ def complete(case_id: int, task_id: int, data: s.Mutation, user=Depends(current_
     return case_response(db, user, service.complete_task(db, user, case_id, task_id, data))
 
 
+@router.put('/cases/{case_id}/tasks/{task_id}')
+def reschedule_task(case_id: int, task_id: int, data: s.TaskReschedule, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_response(db, user, service.reschedule_task(db, user, case_id, task_id, data))
+
+
 @router.post('/cases/{case_id}/quotes')
 def quote(case_id: int, data: s.QuoteInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_response(db, user, service.add_quote(db, user, case_id, data))
@@ -95,7 +97,7 @@ def views(user=Depends(current_user), db=Depends(get_db, scope='function')):
 
 @router.post('/views')
 def save_view(data: s.ViewInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    allowed = {'view', 'status', 'mode', 'priority', 'stage', 'payment', 'blocked', 'due', 'action', 'sort'}
+    allowed = {'view', 'status', 'mode', 'priority', 'stage', 'payment', 'blocked', 'due', 'action', 'sort', 'page'}
     if set(data.filters) - allowed: raise HTTPException(422, 'Filtros no reconocidos')
     view = db.scalar(select(SavedView).where(SavedView.user_id == user.id, SavedView.name == data.name))
     if not view:

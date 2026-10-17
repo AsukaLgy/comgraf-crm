@@ -2,11 +2,16 @@
   "name": "comgraf",
   "version": "1.0.0",
   "private": true,
-  "overrides": {"esbuild": "0.28.1"},
+  "overrides": {
+    "esbuild": "0.28.1"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "lint": "eslint src e2e",
+    "format": "prettier --write src/CasePage.jsx src/CaseAttention.jsx src/CaseActivity.jsx src/CasePrintSheet.jsx src/ProductionStages.jsx src/DeliveryFinance.jsx src/Inbox.jsx src/CaseTable.jsx src/NewCase.jsx src/domain.js src/components.jsx e2e/workflows.spec.js",
+    "format:check": "prettier --check src/CasePage.jsx src/CaseAttention.jsx src/CaseActivity.jsx src/CasePrintSheet.jsx src/ProductionStages.jsx src/DeliveryFinance.jsx src/Inbox.jsx src/CaseTable.jsx src/NewCase.jsx src/domain.js src/components.jsx e2e/workflows.spec.js",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -17,8 +22,14 @@
     "react-router-dom": "7.18.4"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.5",
     "@playwright/test": "1.58.2",
     "@vitejs/plugin-react": "5.1.4",
+    "eslint": "9.39.5",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
     "vite": "7.3.7"
   }
 }

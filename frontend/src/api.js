@@ -20,6 +20,11 @@ export const setTimezone = value => { timezone = value }
 export const date = value => value ? new Intl.DateTimeFormat('es-HN', {timeZone: timezone, year:'numeric', month:'short', day:'2-digit', ...(value.includes('T') ? {hour:'2-digit',minute:'2-digit'} : {})}).format(new Date(value.length === 10 ? value + 'T12:00:00Z' : value)) : 'Sin fecha'
 export const localDate = () => new Intl.DateTimeFormat('en-CA', {timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())
 export const dayKey = value => value.length === 10 ? value : new Intl.DateTimeFormat('en-CA', {timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value))
+export const localInput = value => {
+  if (!value) return ''
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(value)).map(p=>[p.type,p.value]))
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`
+}
 export function toUTC(local) {
   let guess = new Date(local + ':00Z')
   const intended = guess.getTime()

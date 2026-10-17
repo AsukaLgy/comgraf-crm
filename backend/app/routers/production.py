@@ -40,7 +40,7 @@ def cancel(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Dep
 
 
 @router.post('/cases/{case_id}/deliveries')
-def deliver(case_id: int, data: s.DeliveryInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+def deliver(case_id: int, data: s.DeliveryWithPaymentInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_response(db, user, service.deliver(db, user, case_id, data))
 
 

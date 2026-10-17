@@ -31,7 +31,7 @@ export default function ProductForm({record, quote=false, source=null, onClose})
     catch(error){if(error.status===409)await qc.invalidateQueries({queryKey:['case',String(record.id)]});throw error}
   }
   return <FormDialog wide title={quote?'Preparar nueva versión de cotización':'Generar orden de producción'} initial={initial} onClose={onClose} onSave={save} submit={quote?'Guardar cotización':'Generar orden de producción'} render={(v,set)=><>
-    <div className="notice">{quote?'Cotizar no inicia fabricación. Cada versión conserva sus partidas e importes en lempiras.':'Este caso se ampliará y la orden quedará activa en Preparación, dentro del mismo expediente.'}</div>
+    <div className="notice">{quote?'Cotizar no inicia fabricación. Cada versión conserva sus partidas e importes en lempiras.':'Este caso se ampliará en el mismo expediente y la orden quedará activa en la etapa Nuevo.'}</div>
     {oldUsd&&<div className="notice">La cotización seleccionada conserva precios históricos en dólares. Revisa y captura precios nuevos en lempiras; no se aplicó conversión cambiaria.</div>}
     {!quote&&accepted.length>0&&<Select label="Reutilizar cotización aceptada en HNL" empty="Especificar productos manualmente" options={accepted.map(q=>({value:String(q.id),label:`Versión ${q.version} · ${money(q.total,'HNL')}`}))} value={v.quote_id} onChange={e=>{const q=accepted.find(x=>String(x.id)===e.target.value);set('quote_id',e.target.value);if(q)set('items',q.items)}}/>}
     {v.quote_id&&!quote?<div className="notice">Se reutilizarán las partidas y precios de la versión aceptada. <Badge>{v.items.length} productos</Badge></div>:<ItemsEditor items={v.items} onChange={items=>set('items',items)}/>}

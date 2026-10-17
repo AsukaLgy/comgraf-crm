@@ -13,7 +13,12 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 | Bandejas | `frontend/src/Inbox.jsx` | Pool, filtros, vistas guardadas y búsqueda de expedientes. |
 | Tabla compartida | `frontend/src/CaseTable.jsx` | Presentación de casos en bandejas e historial de cliente. |
 | Alta y selección de cliente | `frontend/src/NewCase.jsx` | Nuevo caso, autocompletado y creación explícita de cliente/contacto. |
-| Expediente | `frontend/src/CasePage.jsx` | Acciones, bitácora, cotizaciones, estados de producción, archivos, entregas y saldo. |
+| Coordinación del expediente | `frontend/src/CasePage.jsx` | Carga, mutaciones y composición del expediente. Mantenerlo como coordinador y no concentrar presentación de todos los dominios aquí. |
+| Atención y encabezado | `frontend/src/CaseAttention.jsx` | Abrir/cerrar atención, propietario e información de acción pendiente. |
+| Actividad | `frontend/src/CaseActivity.jsx` | Canales manuales y bitácora. Las notas no abren atención; interacciones entrantes sí. |
+| Etapas | `frontend/src/ProductionStages.jsx` | Barra de cinco etapas, clasificación histórica, programación, bloqueos y retrocesos. |
+| Entrega y finanzas | `frontend/src/DeliveryFinance.jsx` | Registro parcial/completo y abono transaccional opcional, saldos y permisos financieros. |
+| Ficha imprimible | `frontend/src/CasePrintSheet.jsx` | Salida de taller y especificaciones del expediente. |
 | Productos y conversión | `frontend/src/ProductForm.jsx` | Partidas, especificaciones, cotizaciones y ampliación del mismo caso a producción. |
 | Comunicación manual | `frontend/src/Composer.jsx` | Notas, interacciones y borradores locales/remotos; no envía mensajes externos. |
 | Endpoints | `backend/app/routers/` | HTTP, permisos de entrada, dependencias de sesión y traducción a servicios. |
@@ -29,7 +34,10 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 
 - Un caso conserva su ID durante toda su vida; producción se añade al caso, no crea otro expediente.
 - El responsable operativo único es `Case.owner_id`. `Case.collection_owner_id` y `Production.owner_id` son columnas históricas y solo se conservan para compatibilidad y visibilidad heredada.
-- La etapa de producción es la etapa principal de `Production.stage`. `Item.substage` es un dato heredado sin reglas, UI ni serialización activa.
+- `Production.stage` usa NEW, APPROVAL, PRINTING, WORKSHOP, READY. Las transiciones permitidas están expresadas como mapas de códigos, no por posiciones de una lista. `NULL` junto con `classification_required` significa etapa heredada ambigua por clasificar; no es una sexta etapa.
+- `Delivery` calcula cantidades acumuladas; el estado Completa solo procede cuando cada partida está entregada. La entrega completa detiene tiempo productivo sin borrar tiempos ni movimientos.
+- Atención es solo `Abierto`/`Cerrado`; no usar el cierre como condición general de permiso o bloqueo. El predicado de acción inmediata es único en repositorio y servicio de recuperación.
+- El propietario único es `Case.owner_id`. Columnas de responsable por área y datos de subetapa permanecen como históricos, sin reglas activas.
 - Los campos `Production.authorized_at`, `approval_evidence`, `approved_snapshot` y `art_version` conservan datos del flujo anterior. No deben volver a imponer una autorización. `approved_snapshot` sigue siendo una fuente de impresión histórica si no existe `specs_snapshot`.
 - Todas las operaciones financieras nuevas son HNL. Los registros USD históricos no se convierten ni se mezclan con HNL.
 - `Case.version` y la clave idempotente protegen operaciones frente a doble envío y concurrencia. No quitar ambos controles de una mutación.
@@ -44,7 +52,7 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 3. Actualizar el formulario, transformación de payload y estados de error correspondientes en frontend. Mantener entradas visibles al recibir error o conflicto.
 4. Si cambia la persistencia, crear una migración nueva y reversible cuando sea seguro. No editar una migración aplicada, borrar la base, recrear IDs ni reescribir saldos históricos.
 5. Añadir pruebas backend del contrato, permisos, historial y reintentos; ajustar o añadir un recorrido E2E para la interacción visible.
-6. Ejecutar `alembic check`, pruebas backend, compilación frontend y Playwright contra una base cuyo nombre termine en `_test`.
+6. Ejecutar `alembic check`, `ruff check app tests`, pruebas backend, `npm run lint`, `npm run format:check`, compilación y Playwright contra una base cuyo nombre termine en `_test`.
 
 ## Convenciones de lectura
 
@@ -54,9 +62,13 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 - Evitar lógica temporal basada en la zona del navegador. Usar la zona que entrega el servidor y las utilidades de `frontend/src/api.js`.
 - `.env`, `.runtime`, adjuntos y `.vscode` son configuración/datos locales; no son parte de cambios de producto ni deben copiarse a Git.
 
-## Límite de rendimiento conocido
+## Consultas de bandeja
 
-`repository.cases_list()` construye resúmenes por caso y carga relaciones/cálculos dentro del ciclo. Es claro para el volumen local actual, pero el número de consultas crece con los casos listados; además, las bandejas aún no usan paginación. Si el volumen del taller crece, medir primero y después agrupar consultas de clientes, producción, tareas, entregas y ledger sin cambiar los filtros ni las reglas de visibilidad. No resolverlo ocultando conteos o limitando resultados silenciosamente.
+`repository.case_query()` es la fuente común de predicados para filas y contadores. Los filtros, orden, desempate por ID y paginación se aplican en MySQL; las bandejas usan una proyección ligera sin bitácoras, adjuntos o partidas completas. Al agregar un filtro, actualizar tanto el query compartido como las pruebas de igualdad lista/contador. Verificar índices con las consultas reales antes de añadirlos; no ocultar un problema de rendimiento con caché.
+
+## Estilo y herramientas
+
+Desde la raíz: `npm.cmd --prefix frontend run lint`, `format:check`, `build`. En backend: `..\.venv\Scripts\python.exe -m ruff check app tests`, Alembic y pytest. La configuración está en `frontend/eslint.config.js`, `.prettierrc.json` y `backend/pyproject.toml`; la lista de paquetes de desarrollo vive en `backend/requirements-dev.txt`.
 
 ## Verificación local
 

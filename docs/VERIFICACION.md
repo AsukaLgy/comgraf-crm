@@ -1,23 +1,27 @@
 # Verificación de Comgraf
 
-Comprobación realizada localmente el 16 de octubre de 2026 con MySQL Community Server 8.4.11 y una base independiente `comgraf_test`. No se usaron datos E2E en la base operativa `comgraf`.
+Comprobación local del 17 de octubre de 2026. Backend y E2E utilizan MySQL Community Server y la base separada `comgraf_test`; la base operativa `comgraf` no se utilizó para pruebas destructivas.
 
-## Resultado
+## Resultado de esta ronda
 
-- `npm.cmd run build`: compilación Vite correcta (1809 módulos transformados).
-- `python -m pytest -p no:cacheprovider tests -q`: 4 pruebas backend aprobadas contra MySQL; cubren reglas de negocio, permisos y concurrencia.
-- `npm.cmd run test:e2e -- --reporter=list`: 6 recorridos de navegador aprobados contra FastAPI y MySQL reales. Incluyen consulta cerrada sin producción, notas/seguimiento, borradores, formulario conservado ante error, filtros al volver, búsqueda e historial de cliente, cotización aceptada, conversión del mismo expediente, aprobación de arte, etapas, bloqueo, retrabajo, entrega parcial, cierre de atención, anticipo y saldo.
-- Alembic: base operativa en `001_roles (head)` y `alembic check` informó que no hay operaciones pendientes.
-- `scripts/verify_restart.py`: reinicio real de MySQL y del servidor HTTP; diez expedientes conservaron su contenido y la sesión autenticada continuó válida. Se hizo una consulta de borradores determinista por identificador al detectar que MySQL podía devolverlos en distinto orden.
-- Conversión protegida contra una segunda conversión; toma, conversión, pagos y movimientos asociados usan versión/clave idempotente y transacción para resolver reintentos y concurrencia.
+- `npm.cmd --prefix frontend run build`: correcta; Vite transformó 1817 módulos.
+- `npm.cmd --prefix frontend run lint`: correcta con ESLint 9.
+- `npm.cmd --prefix frontend run format:check`: correcta con Prettier.
+- `..\.venv\Scripts\python.exe -m ruff check app tests`: correcta.
+- `pytest tests -q -p no:cacheprovider`: 11 pruebas aprobadas sobre MySQL de pruebas. Cubren ciclo de atención, vencimientos, transacción de entrega+abono, permisos, idempotencia, clasificación histórica, paginación y contadores.
+- `alembic check`: sin diferencias pendientes entre modelos y esquema.
+- E2E con FastAPI y MySQL reales: 7 de 7 recorridos aprobados, incluyendo cierre directo, filtros y vistas guardadas, persistencia de borradores, recuperación de errores, autocompletado, conversión de cotización, producción, entrega parcial y posterior liquidación completa en el flujo combinado.
+- Migraciones 003/004 aplicadas a comgraf y comgraf_test. La comprobación de alcance de datos previo a 004 encontró un expediente y ningún seguimiento vencido asociado a atención cerrada; 004 no cambió estados de casos. No se borraron ni reiniciaron las bases.
 
-Las pruebas de backend vacían las tablas de la base cuyo nombre termina en `_test`. Se deben ejecutar antes de `tests.seed_e2e`; nunca apuntarlas a una base con datos que se deseen conservar.
+La suite backend vacía tablas únicamente en una base cuyo nombre termina en `_test`. Ejecutarla antes de `tests.seed_e2e`; nunca apuntarla a una base con datos que se deseen conservar. E2E también modifica exclusivamente esa base.
 
-## Límites comprobados
+## Límites
 
-- Docker no está instalado en este equipo, así que no pude verificar `docker compose build/up`. La aplicación y la base sí se ejecutaron con la instalación portable local de MySQL, fuera de Compose.
-- Correo y WhatsApp tienen borradores y registro manual; no se conectan ni envían mensajes a proveedores.
-- Las interacciones externas son manuales. Por eso los indicadores de primera respuesta humana, conversión y seguimiento dependen de los registros que capture el equipo. El sistema identifica el alcance operativo y no sustituye contabilidad ni facturación fiscal.
-- No se creó un usuario administrador ni se configuró una contraseña reutilizable. Para iniciar una instalación vacía, seguir el comando interactivo `create-admin` del README.
-- La interfaz local del equipo de desarrollo escucha en `127.0.0.1`. Para dar acceso a estaciones en la LAN, usar Compose y configurar en el `.env` una contraseña exclusiva de la instalación; mantener restringidos el equipo y la base de datos a la red local.
-- La referencia extraída del prototipo está accesible. Estaba disponible el repositorio Frappe CRM, pero no una copia completa del código de Frappe Framework. Comgraf implementa patrones propios y no incorpora código Frappe.
+- Docker no está instalado en este equipo; no se verificó `docker compose build/up`. La verificación se hizo con FastAPI y MySQL local reales.
+- Correo y WhatsApp siguen sin proveedor externo y no envían mensajes.
+- Las métricas que dependen de llamadas, visitas o mensajes externos dependen de registro manual.
+- Este CRM es control operativo de cobros y no reemplaza contabilidad ni fiscalidad.
+- Pruebas de reinicio de servicios/adjuntos y restauración de respaldo no se repitieron en esta ronda.
+- La interfaz del equipo local escucha en `127.0.0.1`; el acceso LAN usa Compose y debe restringirse a la red privada.
+- La revisión 003 normalizó los estados activos heredados a `Abierto` sin copiar el valor anterior a un evento. Para registros ya migrados no es posible reconstruir ese estado a partir de la base actual; la bitácora sí conserva el estado anterior/nuevo para cada cambio realizado desde esta versión.
+- El pago combinado en entrega muestra el saldo real precargado al activar el control. Se puede confirmar ese importe para liquidar o sustituirlo por un abono parcial; la autorización financiera sigue validándose en servidor.

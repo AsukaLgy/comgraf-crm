@@ -1,9 +1,10 @@
-import {Link} from 'react-router-dom'
-import {date, money} from './api'
-import {Badge, Empty} from './components'
+import { Link } from 'react-router-dom'
+import { date, money } from './api'
+import { Badge, Empty } from './components'
+import { PRODUCTION_STAGE_LABELS } from './domain'
 
 // Shared read-only row projection for operational pools and customer history.
-export default function CaseTable({items, remember}) {
+export default function CaseTable({ items, remember }) {
   if (!items.length) return <Empty />
 
   return (
@@ -33,14 +34,20 @@ export default function CaseTable({items, remember}) {
               </td>
               <td>{record.client.name}</td>
               <td>{record.owner_name || <span className="muted">Sin asignar</span>}</td>
-              <td><Badge>{record.status}</Badge></td>
+              <td>
+                <Badge>{record.status}</Badge>
+              </td>
               <td>
                 {record.production ? (
                   <>
-                    <Badge tone={productionTone(record.production)}>{productionLabel(record.production)}</Badge>
+                    <Badge tone={productionTone(record.production)}>
+                      {productionLabel(record.production)}
+                    </Badge>
                     <small>Entrega {record.delivery_status.toLowerCase()}</small>
                   </>
-                ) : <span className="muted">Atención</span>}
+                ) : (
+                  <span className="muted">Atención</span>
+                )}
               </td>
               <td>
                 {record.production?.committed_date ? date(record.production.committed_date) : '—'}
@@ -50,7 +57,9 @@ export default function CaseTable({items, remember}) {
                 <Badge tone={priorityTone(record.priority)}>{record.priority}</Badge>
               </td>
               <td>
-                {record.balance === undefined ? '—' : money(record.balance, record.production?.currency)}
+                {record.balance === undefined
+                  ? '—'
+                  : money(record.balance, record.production?.currency)}
                 {record.payment_status === 'Vencido' && <small className="text-red">Vencido</small>}
               </td>
             </tr>
@@ -70,7 +79,12 @@ function productionTone(production) {
 function productionLabel(production) {
   if (production.cancelled_at) return 'Cancelado'
   if (production.blocked_since) return 'Bloqueado'
-  return production.stage
+  if (production.result_label) return production.result_label
+  return (
+    production.stage_label ||
+    PRODUCTION_STAGE_LABELS[production.stage] ||
+    'Pendiente de clasificación'
+  )
 }
 
 function priorityTone(priority) {
