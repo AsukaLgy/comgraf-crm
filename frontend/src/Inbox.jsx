@@ -18,7 +18,7 @@ export const VIEW_LABELS = {
   overdue: 'Cobros vencidos',
   refunds: 'Devoluciones pendientes',
   'cancellation-review': 'Anulaciones por resolver',
-  finalized: 'Finalizados',
+  finalized: 'Completados',
   history: 'Historial',
   all: 'Todos los expedientes',
 }
@@ -169,6 +169,15 @@ export default function Inbox({ user, view = 'pool', home = false, search = fals
           </div>
         </div>
         <div className="filters">
+          {['history', 'all'].includes(view) && (
+            <Select
+              label="Ciclo de vida"
+              options={['Activo', 'Completado']}
+              empty="Todos"
+              value={filters.lifecycle || ''}
+              onChange={(e) => set('lifecycle', e.target.value)}
+            />
+          )}
           <Select
             label="Estado"
             empty="Todos los estados"

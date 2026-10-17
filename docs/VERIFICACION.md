@@ -35,3 +35,13 @@ Las nuevas revisiones `005_commercial_cancellation` y `006_cancelled_stage_snaps
 - No repetí restauración de respaldo ni prueba de recuperación del servidor operativo.
 - Correo/WhatsApp no están conectados; interacciones externas siguen siendo registros manuales.
 - Los tests vacían las tablas solo en una base cuyo nombre termina en `_test`. No apuntarlos a datos operativos.
+
+## Actualizacion de ciclo de vida y recogida (version 1.2.0, contrato HTTP 3)
+
+- Compilacion Vite 1.2.0: correcta. ESLint, Prettier y Ruff: correctos.
+- Backend sobre MySQL local independiente `comgraf_test`: 18 pruebas aprobadas; cubren completar/reactivar con reintentos, bloqueo por tarea futura y produccion/saldo pendientes, seguimiento semanal unico, entrega parcial/completa y continuidad de contactos.
+- Alembic `check`: sin diferencias entre modelos y esquema despues de aplicar `007_case_completion_pickup` en la base de pruebas.
+- Playwright en FastAPI + MySQL de prueba: 10/10 recorridos aprobados, incluidos cierre y completado, borradores por canal, plantillas, conversion aceptada, archivos, entrega/cobro y cancelacion. Despues se repitio el recorrido de cotizacion para verificar enlaces OP/COT tras recargar; tambien aprobo.
+- El historico de llamadas/visitas se conserva como evento, aunque la interfaz nueva solo ofrece Notas, Correo y WhatsApp. No se envia correo/WhatsApp.
+
+La migracion 007 no se aplico a la base operativa `comgraf`, no se cambio su contenido ni sus adjuntos. Para actualizarla, respalda SQL y archivos, detiene Comgraf, ejecuta `scripts/update-local.ps1` y reinicia; la migracion deja todos los expedientes existentes Activos y permite tareas de recogida sin responsable. No ejecutes pruebas con `MYSQL_DATABASE=comgraf`.

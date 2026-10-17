@@ -115,7 +115,16 @@ export function Modal({ title, onClose, children, wide = false, busy = false }) 
     </dialog>
   )
 }
-export function FormDialog({ title, initial, onClose, onSave, render, wide, submit = 'Guardar' }) {
+export function FormDialog({
+  title,
+  initial,
+  onClose,
+  onSave,
+  render,
+  wide,
+  submit = 'Guardar',
+  canSubmit = true,
+}) {
   const [values, setValues] = useState(initial),
     [error, setError] = useState(null),
     [busy, setBusy] = useState(false)
@@ -151,7 +160,7 @@ export function FormDialog({ title, initial, onClose, onSave, render, wide, subm
           <button type="button" onClick={onClose} disabled={busy}>
             Cancelar
           </button>
-          <button className="primary" disabled={busy}>
+          <button className="primary" disabled={busy || !canSubmit}>
             {busy ? 'Guardando…' : submit}
           </button>
         </footer>

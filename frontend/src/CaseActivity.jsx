@@ -1,9 +1,10 @@
 import { Clock, MessageSquare } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { date } from './api'
 import { Badge, Empty, Panel } from './components'
 import Composer from './Composer'
 
-export default function CaseActivity({ record, attention, user, person }) {
+export default function CaseActivity({ record, attention, user, person, onReference }) {
   return (
     <Panel title="Bitácora y comunicación" action={<Badge>{record.events.length} eventos</Badge>}>
       {attention ? (
@@ -29,6 +30,28 @@ export default function CaseActivity({ record, attention, user, person }) {
                   <time>{date(event.created_at)}</time>
                 </div>
                 <p>{event.body}</p>
+                {event.data?.action === 'converted' && (
+                  <p className="event-references">
+                    <Link to="#production" onClick={() => onReference?.('production')}>
+                      Orden {event.data.order_number || `OP-${String(record.id).padStart(5, '0')}`}
+                    </Link>
+                    {event.data.quote_id &&
+                    (record.quotes || []).some((q) => q.id === event.data.quote_id) ? (
+                      <>
+                        {' '}
+                        ·{' '}
+                        <Link
+                          to={`#quote-${event.data.quote_id}`}
+                          onClick={() => onReference?.(`quote-${event.data.quote_id}`)}
+                        >
+                          Cotización {event.data.quote_number}, versión {event.data.quote_version}
+                        </Link>
+                      </>
+                    ) : event.data.quote_id ? (
+                      <small> · Cotización no disponible o sin permiso</small>
+                    ) : null}
+                  </p>
+                )}
                 {event.data.direction && <small>{event.data.direction} · Registro manual</small>}
               </div>
             </li>

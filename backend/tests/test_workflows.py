@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.db import engine, SessionLocal
 from app.config import settings
-from app.models import Case, Production, Ledger, Item, Quote, Task, Role, User
+from app.models import Case, Production, Ledger, Item, Quote, Task, Role, User, Event
 from app.repository import today
 from app.services import reopen_overdue_attention
 
@@ -44,7 +44,7 @@ def test_attention_history_search_and_drafts(clients):
     c=mutate(api,c,'take')
     c=mutate(api,c,'events',{'kind':'Nota interna','channel':'Nota','body':'Consulta de precios sin fabricación'})
     assert c['first_response_at'] is None
-    c=mutate(api,c,'events',{'kind':'Interacción manual','channel':'Visita','direction':'Saliente','body':'Atendimos la consulta presencial'})
+    c=mutate(api,c,'events',{'kind':'Interacción manual','channel':'WhatsApp','direction':'Saliente','body':'Atendimos la consulta presencial'})
     assert c['first_response_at']
     for channel in ['Nota','Correo','WhatsApp']:
         must(api.put(f'/api/cases/{original}/drafts/{channel}',json={'body':f'Borrador {channel}','version':0}))
@@ -58,6 +58,11 @@ def test_attention_history_search_and_drafts(clients):
         result=must(api.get('/api/cases',params={'view':'all','q':term}))
         assert result['total']==1
     assert must(api.get('/api/clients/'+str(customer['id'])))['cases'][0]['id']==original
+    with SessionLocal.begin() as db:
+        db.add(Event(case_id=original,actor_id=c['owner_id'],kind='Historical',channel='Llamada',body='Legacy phone record',data={}))
+        db.add(Event(case_id=original,actor_id=c['owner_id'],kind='Historical',channel='Visita',body='Legacy visit record',data={}))
+    historical=must(api.get(f'/api/cases/{original}'))
+    assert {event['channel'] for event in historical['events'] if event['body'].startswith('Legacy ')}=={'Llamada','Visita'}
     assert must(api.get('/api/cases?view=history'))['total']==1
     assert must(api.get('/api/counts'))['history']==1
     engine.dispose()
@@ -67,15 +72,17 @@ def test_attention_history_search_and_drafts(clients):
 def test_attention_can_open_and_close_without_reason_and_incoming_reopens(clients):
     api=clients['admin'];_,c=create(api,'Atención independiente del trabajo')
     c=mutate(api,c,'take')
+    c=mutate(api,c,'events',{'kind':'Interacción manual','channel':'WhatsApp','direction':'Entrante','body':'Incoming message before closure'})
+    assert c['pending_message'] is True
     c=mutate(api,c,'attention',{'status':'Cerrado'})
-    assert c['status']=='Cerrado' and c['production'] is None and c['close_reason'] is None
+    assert c['status']=='Cerrado' and c['production'] is None and c['close_reason'] is None and c['pending_message'] is False
     assert must(api.get('/api/cases?view=action'))['total']==0
     c=mutate(api,c,'events',{'kind':'Nota interna','channel':'Nota','body':'Nota guardada después del cierre'})
     assert c['status']=='Cerrado' and must(api.get('/api/cases?view=action'))['total']==0
     c=mutate(api,c,'attention',{'status':'Abierto'})
     assert c['status']=='Abierto' and must(api.get('/api/cases?view=action'))['total']==1
     c=mutate(api,c,'attention',{'status':'Cerrado'})
-    c=mutate(api,c,'events',{'kind':'Interacción manual','channel':'Llamada','direction':'Entrante','body':'Nueva consulta entrante'})
+    c=mutate(api,c,'events',{'kind':'Interacción manual','channel':'WhatsApp','direction':'Entrante','body':'Nueva consulta entrante'})
     assert c['status']=='Abierto' and c['pending_message']
     automated=[e for e in c['events'] if e['data'].get('action')=='attention_status' and e['data'].get('origin')=='automatic']
     assert len(automated)==1
@@ -104,6 +111,59 @@ def test_future_followup_close_then_due_recovery_and_reschedule(clients):
     payload={'version':c['version'],'key':key(),'due_at':new_due.isoformat()}
     c=must(api.put(f'/api/cases/{c["id"]}/tasks/{task["id"]}',json=payload))
     assert c['tasks'][0]['done_at'] is None and c['tasks'][0]['due_at'].startswith((new_due.date()).isoformat())
+
+
+def test_explicit_completion_reactivation_and_future_task_blockers(clients):
+    api=clients['admin'];_,c=create(api,'Resolved consultation')
+    c=mutate(api,c,'take')
+    c=mutate(api,c,'attention',{'status':'Cerrado'})
+    assert c['lifecycle']=='Activo' and must(api.get('/api/cases?view=mine'))['total']==1
+    due=(datetime.now(timezone.utc)+timedelta(days=8)).isoformat()
+    c=mutate(api,c,'tasks',{'title':'Confirm delivery','owner_id':c['owner_id'],'due_at':due})
+    blocked=api.post(f'/api/cases/{c["id"]}/complete',json={'version':c['version'],'key':key()})
+    assert blocked.status_code==409 and 'seguimiento pendiente' in blocked.json()['detail']
+    assert must(api.get(f'/api/cases/{c["id"]}'))['tasks'][0]['done_at'] is None
+    c=mutate(api,c,f'tasks/{c["tasks"][0]["id"]}/complete')
+    completion={'version':c['version'],'key':key()}
+    c=must(api.post(f'/api/cases/{c["id"]}/complete',json=completion))
+    replay=must(api.post(f'/api/cases/{c["id"]}/complete',json=completion))
+    assert replay['lifecycle']=='Completado'
+    assert must(api.get('/api/cases?view=mine'))['total']==0
+    assert must(api.get('/api/cases?view=finalized'))['total']==1
+    assert c['status']=='Cerrado' and c['completed_by_id']
+    c=mutate(api,c,'reactivate')
+    assert c['lifecycle']=='Activo' and c['status']=='Abierto' and c['completed_at'] is None
+    assert len([e for e in c['events'] if e['data'].get('action') in ('case_completed','case_reactivated')])==2
+
+
+def test_completion_reports_live_production_and_financial_blockers(clients):
+    api=clients['admin'];_,c=create(api,'Production still pending')
+    c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
+    blocked=api.post(f'/api/cases/{c["id"]}/complete',json={'version':c['version'],'key':key()})
+    assert blocked.status_code==409 and 'Falta entregar 100' in blocked.json()['detail'] and '1,000.00 por cobrar' in blocked.json()['detail']
+    current=must(api.get(f'/api/cases/{c["id"]}'))
+    assert current['lifecycle']=='Activo' and current['production']['stage']=='NEW' and current['balance']=='1000.00'
+
+
+def test_weekly_pickup_followup_partial_and_full_delivery(clients):
+    api=clients['admin'];_,c=create(api,'Waiting for pickup')
+    c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
+    for stage in ['APPROVAL','PRINTING','WORKSHOP','READY']:
+        c=mutate(api,c,'production/stage',{'stage':stage})
+    pickup=[task for task in c['tasks'] if task['category']=='PICKUP']
+    assert len(pickup)==1 and pickup[0]['owner_id']==c['owner_id']
+    assert datetime.fromisoformat(pickup[0]['due_at'].replace('Z','+00:00')).date() >= (datetime.now(timezone.utc)+timedelta(days=6)).date()
+    assert api.get('/api/cases?view=ready').json()['total']==1
+    c=mutate(api,c,f'tasks/{pickup[0]["id"]}/complete',{'note':'Customer will pick up Friday','schedule_next_pickup':True})
+    next_task=next(task for task in c['tasks'] if task['category']=='PICKUP' and task['done_at'] is None)
+    assert datetime.fromisoformat(next_task['due_at'].replace('Z','+00:00')).date() >= (datetime.now(timezone.utc)+timedelta(days=6)).date()
+    delivery={'item_id':c['items'][0]['id'],'quantity':'40','delivered_at':datetime.now(timezone.utc).isoformat(),'receiver':'Customer','method':'Pickup','evidence':'Partial delivery'}
+    c=mutate(api,c,'deliveries',delivery)
+    assert next(task for task in c['tasks'] if task['id']==next_task['id'])['done_at'] is None
+    c=mutate(api,c,'deliveries',{**delivery,'quantity':'60'})
+    assert c['delivery_status']=='Completa'
+    assert next(task for task in c['tasks'] if task['id']==next_task['id'])['done_at'] is not None
+    assert len([e for e in c['events'] if e['data'].get('action')=='pickup_followup_resolved'])==1
 
 
 def test_delivery_and_payment_are_one_idempotent_financial_operation(clients):
@@ -227,6 +287,9 @@ def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts)
     assert c['id']==quote['case_id'] and c['mode']=='Producción'
     assert c['items'][0]['quantity']=='100.000' and c['production']['stage']=='NEW'
     assert any(e['body']=='Conservar esta conversación' for e in c['events'])
+    generated=next(e for e in c['events'] if e['data'].get('action')=='converted')
+    assert generated['data']['order_number']==f'OP-{c["id"]:05d}'
+    assert generated['data']['quote_number']==f'COT-{quote["id"]:05d}' and generated['data']['quote_version']==quote['version']
     assert c['balance']=='1000.00'
     c=mutate(api,c,'production/schedule',{'scheduled_at':datetime.now(timezone.utc).isoformat(),'committed_date':str(today()+timedelta(days=2))})
     schedule_event=next(e for e in c['events'] if e['data'].get('action')=='schedule')
@@ -347,7 +410,7 @@ def test_cancellation_without_payment_clears_charge_and_cannot_fake_refund(clien
     assert len([x for x in c['ledger'] if x['kind']=='Ajuste de anulación'])==1
     assert c['production']['active_elapsed_seconds'] is None
     c=mutate(api,c,'attention',{'status':'Cerrado'})
-    assert api.get('/api/cases?view=mine').json()['total']==0
+    assert api.get('/api/cases?view=mine').json()['total']==1
 
 
 def test_cancellation_without_finance_queues_review_then_resolves(clients,accounts):
@@ -356,7 +419,7 @@ def test_cancellation_without_finance_queues_review_then_resolves(clients,accoun
         db.add(Role(name=role_name,permissions=['production']))
         user=User(username='cancelador',name='Cancelador',password_hash='unused',roles=[role_name],capacity=20)
         db.add(user);db.flush(); uid=user.id
-    api=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'2'})
+    api=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'3'})
     with SessionLocal.begin() as db:
         user=db.get(User,uid)
         user.password_hash=__import__('app.security',fromlist=['passwords']).passwords.hash('cancelador-password-2026')

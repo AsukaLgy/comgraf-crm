@@ -1,11 +1,12 @@
 import hashlib
 import json
+from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
 from sqlalchemy import select, func
 from .models import Case, Delivery, Event, Idempotency, Item, Ledger, Production, Quote, Task, User, now
 from .security import can, require
-from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance, attention_predicates
+from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance, attention_predicates, case_completion_blockers
 from . import schemas as s
 
 NEXT_STAGE = s.NEXT_STAGE
@@ -23,7 +24,7 @@ def event(db, case, user, body, kind='Sistema', channel='Sistema', data=None):
 
 
 # ---- Concurrencia, idempotencia y asignación principal ----
-def mutation(db, user, case_id, data, action, permission):
+def mutation(db, user, case_id, data, action, permission, *, allow_completed=False):
     require(db, user, permission)
     case = get_case(db, user, case_id, lock=True)
     if permission == 'attention' and not can(db, user, 'assign') and case.owner_id != user.id:
@@ -35,6 +36,8 @@ def mutation(db, user, case_id, data, action, permission):
         if previous.action != action or previous.request_hash != signature or previous.actor_id != user.id:
             fail('La clave de reintento ya pertenece a otra operación', 409)
         return case, False
+    if case.lifecycle == 'Completado' and not allow_completed:
+        fail('El caso está completado. Reactívalo antes de registrar nuevas gestiones.', 409)
     if case.version != data.version:
         fail('El expediente cambió. Actualiza los datos y revisa el formulario antes de reintentar.', 409)
     db.add(Idempotency(case_id=case_id, key=data.key, request_hash=signature, action=action, actor_id=user.id))
@@ -56,6 +59,7 @@ def take(db, user, case_id, data):
     # Lock user first, serializing capacity checks across different cases.
     db.scalar(select(User).where(User.id == user.id).with_for_update())
     case = get_case(db, user, case_id, lock=True)
+    if case.lifecycle == 'Completado': fail('El caso está completado y no se puede tomar desde una bandeja activa', 409)
     if case.owner_id == user.id:
         return case
     if case.owner_id:
@@ -110,6 +114,44 @@ def update_case_details(db, user, case_id, data):
     return case
 
 
+def complete_case(db, user, case_id, data):
+    case, changed = mutation(db, user, case_id, data, 'case_complete', 'attention', allow_completed=True)
+    if not changed: return case
+    if case.lifecycle == 'Completado': fail('El caso ya está completado', 409)
+    blockers = case_completion_blockers(db, case, show_finances=True)
+    if blockers: fail('No se puede completar el caso: ' + ' '.join(blockers), 409)
+    completed_at = now()
+    old_status = case.status
+    case.lifecycle = 'Completado'
+    case.completed_at = completed_at
+    case.completed_by_id = user.id
+    case.status = 'Cerrado'
+    case.closed_at = completed_at
+    event(db, case, user, 'Caso completado', data={
+        'action': 'case_completed', 'lifecycle_from': 'Activo', 'lifecycle_to': 'Completado',
+        'attention_from': old_status, 'attention_to': 'Cerrado', 'origin': 'manual',
+        'completed_at': completed_at.isoformat() + 'Z', 'actor_id': user.id})
+    return case
+
+
+def reactivate_case(db, user, case_id, data):
+    case, changed = mutation(db, user, case_id, data, 'case_reactivate', 'attention', allow_completed=True)
+    if not changed: return case
+    if case.lifecycle != 'Completado': fail('El caso ya está activo', 409)
+    old_completed_at, old_completed_by = case.completed_at, case.completed_by_id
+    case.lifecycle = 'Activo'
+    case.completed_at = None
+    case.completed_by_id = None
+    case.status = 'Abierto'
+    case.closed_at = None
+    event(db, case, user, 'Caso reactivado', data={
+        'action': 'case_reactivated', 'lifecycle_from': 'Completado', 'lifecycle_to': 'Activo',
+        'attention_from': 'Cerrado', 'attention_to': 'Abierto', 'origin': 'manual',
+        'previous_completed_at': old_completed_at.isoformat() + 'Z' if old_completed_at else None,
+        'previous_completed_by_id': old_completed_by})
+    return case
+
+
 # ---- Actividad y seguimientos de atención ----
 def add_event(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'event', 'attention')
@@ -144,14 +186,36 @@ def add_task(db, user, case_id, data):
     return case
 
 
+def schedule_pickup_followup(db, case, user, due_at=None):
+    open_pickup = db.scalar(select(Task.id).where(Task.case_id == case.id, Task.category == 'PICKUP', Task.done_at.is_(None)).limit(1))
+    if open_pickup:
+        return db.get(Task, open_pickup)
+    due_at = due_at or now() + timedelta(days=7)
+    task = Task(case_id=case.id, owner_id=case.owner_id, category='PICKUP', title='Contactar al cliente por trabajo listo para recoger', due_at=due_at)
+    db.add(task)
+    event(db, case, user, 'Seguimiento de recogida programado para siete días después de quedar listo', data={
+        'action': 'pickup_followup_created', 'due_at': due_at.isoformat() + 'Z', 'owner_id': case.owner_id})
+    return task
+
+
 def complete_task(db, user, case_id, task_id, data):
     case, changed = mutation(db, user, case_id, data, f'task:{task_id}', 'attention')
     if not changed: return case
     task = db.get(Task, task_id)
     if not task or task.case_id != case_id: fail('Seguimiento no encontrado', 404)
     if task.done_at: fail('El seguimiento ya está completado', 409)
+    production = db.get(Production, case.id)
+    if data.schedule_next_pickup and (task.category != 'PICKUP' or not production or production.cancelled_at or delivery_status(db, case.id) == 'Completa'):
+        fail('No se puede programar otro seguimiento de recogida para este trabajo')
     task.done_at = now()
     event(db, case, user, f'Seguimiento completado: {task.title}')
+    if data.note.strip():
+        event(db, case, user, data.note.strip(), 'Nota interna', 'Nota', {'direction': 'Interna', 'manual': True, 'source': 'pickup_followup'})
+    if data.schedule_next_pickup:
+        due_at = now() + timedelta(days=7)
+        next_task = Task(case_id=case.id, owner_id=case.owner_id, category='PICKUP', title='Contactar al cliente por trabajo listo para recoger', due_at=due_at)
+        db.add(next_task)
+        event(db, case, user, 'Siguiente seguimiento de recogida programado', data={'action': 'pickup_followup_created', 'due_at': due_at.isoformat() + 'Z', 'owner_id': case.owner_id})
     return case
 
 
@@ -175,6 +239,7 @@ def reopen_overdue_attention(db):
     """Idempotent recovery pass; called at startup and periodically by the app."""
     due_cases = db.scalars(select(Case).where(
         Case.status == 'Cerrado',
+        Case.lifecycle == 'Activo',
         select(Task.id).where(Task.case_id == Case.id, Task.done_at.is_(None), Task.due_at <= now()).exists(),
     ).with_for_update()).all()
     for case in due_cases:
@@ -227,6 +292,8 @@ def convert(db, user, case_id, data):
         if not quote or quote.case_id != case.id or quote.status != 'Aceptada': fail('Selecciona una cotización aceptada de este caso')
         if quote.currency != CURRENCY_HNL: fail('Esta cotización histórica está en USD. Revísala y crea una nueva versión en HNL antes de generar producción.', 409)
         items = quote.items
+    else:
+        quote = None
     if not items: fail('Agrega al menos un producto')
     price = total(items)
     if data.advance_required > price: fail('El anticipo no puede superar el precio')
@@ -244,7 +311,14 @@ def convert(db, user, case_id, data):
     db.add(Ledger(case_id=case.id, kind='Obligación', amount=price, currency=CURRENCY_HNL,
         due_date=data.payment_due_date, reference='Orden de producción', actor_id=user.id))
     case.mode = 'Producción'
-    event(db, case, user, f'Orden generada por {user.name} · Nuevo', data={'action': 'converted', 'quote_id': data.quote_id, 'currency': CURRENCY_HNL})
+    order_number = f'OP-{case.id:05d}'
+    quote_number = f'COT-{quote.id:05d}' if quote else None
+    body = f'{user.name} generó la orden {order_number}'
+    if quote:
+        body += f' a partir de la cotización {quote_number}, versión {quote.version}'
+    event(db, case, user, body, data={'action': 'converted', 'order_number': order_number,
+        'quote_id': quote.id if quote else None, 'quote_number': quote_number,
+        'quote_version': quote.version if quote else None, 'currency': CURRENCY_HNL})
     return case
 
 
@@ -267,6 +341,7 @@ def change_stage(db, user, case_id, data):
         production.classification_required = False
         production.stage_started_at = now()
         event(db, case, user, f'Clasificación explícita de etapa histórica: {legacy or "Sin etapa legible"} → {s.STAGE_LABELS[data.stage]}', data={'action': 'stage_classified', 'legacy_stage': legacy, 'stage': data.stage, 'origin': 'manual_classification'})
+        if data.stage == 'READY': schedule_pickup_followup(db, case, user)
         return case
     old = production.stage
     if data.stage == old: fail('La etapa ya está activa', 409)
@@ -279,6 +354,7 @@ def change_stage(db, user, case_id, data):
     duration = (now() - production.stage_started_at).total_seconds()
     production.stage, production.stage_started_at = data.stage, now()
     event(db, case, user, f'Producción: {s.STAGE_LABELS[old]} → {s.STAGE_LABELS[data.stage]}' + (f'. {data.reason}' if data.reason else ''), data={'action': 'stage', 'from': old, 'to': data.stage, 'seconds': duration, 'rework': moving_back})
+    if data.stage == 'READY': schedule_pickup_followup(db, case, user)
     return case
 
 
@@ -438,6 +514,10 @@ def deliver(db, user, case_id, data):
     if delivery_status(db, case.id) == 'Completa':
         duration = (now() - production.stage_started_at).total_seconds()
         event(db, case, user, 'Entrega completa. Se detiene el tiempo activo de producción y la situación de pago se conserva.', data={'action': 'delivery_completed', 'stage': production.stage, 'seconds': duration})
+        pickup_tasks = db.scalars(select(Task).where(Task.case_id == case.id, Task.category == 'PICKUP', Task.done_at.is_(None))).all()
+        for task in pickup_tasks: task.done_at = now()
+        if pickup_tasks:
+            event(db, case, user, 'Seguimiento de recogida resuelto automáticamente por entrega completa', data={'action': 'pickup_followup_resolved', 'task_ids': [task.id for task in pickup_tasks], 'origin': 'automatic'})
     return case
 
 

@@ -32,6 +32,11 @@ export default function CaseTable({ items, remember, user }) {
                   <small className="case-number">{record.number}</small>
                   <strong>{record.subject}</strong>
                 </Link>
+                {record.lifecycle === 'Completado' && (
+                  <small>
+                    <Badge tone="teal">Completado</Badge> {date(record.completed_at)}
+                  </small>
+                )}
                 {record.requires_action && <span className="action-dot" title="Requiere acción" />}
                 {!record.owner_id && can(user, 'attention') && <TakeCaseButton record={record} />}
               </td>
@@ -47,6 +52,10 @@ export default function CaseTable({ items, remember, user }) {
                       {productionLabel(record.production)}
                     </Badge>
                     <small>Entrega {record.delivery_status.toLowerCase()}</small>
+                    {record.production.stage === 'READY' &&
+                      record.delivery_status !== 'Completa' && (
+                        <small>{record.production.ready_days || 0} días sin recoger</small>
+                      )}
                   </>
                 ) : (
                   <span className="muted">Atención</span>
@@ -65,6 +74,12 @@ export default function CaseTable({ items, remember, user }) {
                   : money(record.balance, record.production?.currency)}
                 {record.production?.cancellation_review_pending && (
                   <small className="text-red">Resolución de anulación pendiente</small>
+                )}
+                {record.production?.stage === 'READY' && record.pickup_payment_status && (
+                  <small>
+                    {record.pickup_payment_status} · recibido{' '}
+                    {money(record.received_amount, record.production.currency)}
+                  </small>
                 )}
                 {record.balance < 0 && <small>Pendiente de devolución</small>}
                 {record.payment_status === 'Vencido' && <small className="text-red">Vencido</small>}

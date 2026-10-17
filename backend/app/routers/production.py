@@ -72,6 +72,7 @@ def reverse(case_id: int, entry_id: int, data: s.ReasonInput, user=Depends(curre
 @router.post('/cases/{case_id}/attachments', status_code=201)
 def upload(case_id: int, file: UploadFile = File(...), art_version: str = Form(''), user=Depends(current_user), db=Depends(get_db, scope='function')):
     case = get_case(db, user, case_id, lock=True)
+    if case.lifecycle == 'Completado': raise HTTPException(409, 'Reactiva el caso antes de adjuntar archivos nuevos')
     if not (can(db, user, 'production') and case.mode == 'Producción') and not (can(db, user, 'attention') and (case.owner_id == user.id or can(db, user, 'assign'))):
         raise HTTPException(403, 'No tienes permiso para adjuntar archivos a este caso')
     if len(art_version) > 100: raise HTTPException(422, 'Versión demasiado larga')

@@ -30,9 +30,19 @@ export default function CasePage({ user, print = false }) {
     users = people.data || [],
     close = () => setModal(null)
   const attention = can(user, 'attention') && (c.owner_id === user.id || can(user, 'assign')),
-    canTake = can(user, 'attention') && !c.owner_id,
+    canTake = can(user, 'attention') && !c.owner_id && c.lifecycle !== 'Completado',
     production = can(user, 'production'),
     finance = can(user, 'finance')
+  const activeAttention = attention && c.lifecycle !== 'Completado'
+  const completionBlockers = c.completion_blockers || []
+  async function changeLifecycle(action) {
+    const result = await api(`/cases/${c.id}/${action}`, {
+      method: 'POST',
+      body: { version: c.version, key: uid() },
+    })
+    qc.setQueryData(['case', String(c.id)], result)
+    await qc.invalidateQueries()
+  }
   const person = (id) => users.find((u) => u.id === id)?.name || 'Sin asignar'
   const personOptions = (permission) =>
     users.filter((u) => u.active && can(u, permission)).map((u) => ({ value: u.id, label: u.name }))
@@ -203,9 +213,9 @@ export default function CasePage({ user, print = false }) {
       <CaseAttention
         record={c}
         person={person}
-        canAttend={attention}
+        canAttend={activeAttention}
         canTake={canTake}
-        canAssign={can(user, 'assign')}
+        canAssign={can(user, 'assign') && c.lifecycle !== 'Completado'}
         onTake={() => operation('take', 'Tomar caso', [], {}, undefined, 'Tomar caso')}
         onAssign={assign}
         onConvert={() => setModal({ type: 'convert' })}
@@ -230,11 +240,28 @@ export default function CasePage({ user, print = false }) {
             (v) => ({ priority: v.priority, next_action: v.next_action }),
           )
         }
+        canComplete={completionBlockers.length === 0}
+        completionBusy={attentionBusy}
+        canReactivate={attention}
+        onComplete={() => setModal({ type: 'complete' })}
+        onReactivate={async () => {
+          if (attentionBusy) return
+          setAttentionBusy(true)
+          setAttentionError(null)
+          try {
+            await changeLifecycle('reactivate')
+          } catch (error) {
+            setAttentionError(error)
+            if (error.status === 409) await query.refetch()
+          } finally {
+            setAttentionBusy(false)
+          }
+        }}
       />
       {p && (
         <ProductionStages
           record={c}
-          canManage={production}
+          canManage={production && c.lifecycle !== 'Completado'}
           onSchedule={schedule}
           onDelivery={delivery}
           operation={operation}
@@ -260,13 +287,28 @@ export default function CasePage({ user, print = false }) {
             ))}
           </div>
           {section === 'Actividad' && (
-            <CaseActivity record={c} attention={attention} user={user} person={person} />
+            <CaseActivity
+              record={c}
+              attention={activeAttention}
+              user={user}
+              person={person}
+              onReference={(reference) => {
+                setSection(reference === 'production' ? 'Producción' : 'Cotizaciones')
+                window.setTimeout(
+                  () =>
+                    document
+                      .getElementById(reference)
+                      ?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+                  0,
+                )
+              }}
+            />
           )}
           {section === 'Cotizaciones' && (
             <Panel
               title="Cotizaciones y versiones"
               action={
-                attention && (
+                activeAttention && (
                   <button onClick={() => setModal({ type: 'quote' })}>
                     <Plus size={15} />
                     Nueva versión
@@ -276,7 +318,7 @@ export default function CasePage({ user, print = false }) {
             >
               {c.quotes.length ? (
                 c.quotes.map((q) => (
-                  <article className="quote" key={q.id}>
+                  <article className="quote" id={`quote-${q.id}`} key={q.id}>
                     <div className="section-line">
                       <h3>
                         Versión {q.version}{' '}
@@ -298,12 +340,12 @@ export default function CasePage({ user, print = false }) {
                     ))}
                     {q.decision_evidence && <p>{q.decision_evidence}</p>}
                     <div className="actions">
-                      {attention && (
+                      {activeAttention && (
                         <button onClick={() => setModal({ type: 'quote', source: q })}>
                           Revisar en nueva versión
                         </button>
                       )}
-                      {attention && q.status === 'Pendiente' && (
+                      {activeAttention && q.status === 'Pendiente' && (
                         <button
                           onClick={() =>
                             operation(
@@ -329,7 +371,7 @@ export default function CasePage({ user, print = false }) {
                           Registrar decisión
                         </button>
                       )}
-                      {attention && !p && q.status === 'Aceptada' && q.currency === 'HNL' && (
+                      {activeAttention && !p && q.status === 'Aceptada' && q.currency === 'HNL' && (
                         <button
                           className="primary"
                           onClick={() => setModal({ type: 'convert', source: q })}
@@ -349,6 +391,7 @@ export default function CasePage({ user, print = false }) {
           )}
           {section === 'Producción' && p && (
             <Panel title="Especificaciones de producción">
+              <div id="production" />
               <div className="notice">
                 Etapa actual: {p.stage_label || 'Pendiente de clasificación'}. Las especificaciones
                 capturadas al generar se conservan como referencia histórica.
@@ -368,60 +411,63 @@ export default function CasePage({ user, print = false }) {
               ))}
               <h3>Instrucciones</h3>
               <p className="prewrap">{p.instructions || 'Sin instrucciones adicionales'}</p>
-              {can(user, 'production') && !p.cancelled_at && c.delivery_status !== 'Completa' && (
-                <button
-                  className="danger"
-                  onClick={() =>
-                    operation(
-                      'production/cancel',
-                      'Anular trabajo',
-                      [
-                        { ...reason, label: 'Motivo de anulación' },
-                        ...(finance && can(user, 'adjust')
-                          ? [
-                              {
-                                name: 'treatment',
-                                label: 'Tratamiento económico',
-                                options: [
-                                  { value: 'SIN_CARGO', label: 'Sin cargo por cancelación' },
-                                  {
-                                    value: 'IMPORTE_FINAL',
-                                    label: 'Con importe final acordado a cobrar',
-                                  },
-                                ],
-                                empty: 'Seleccionar tratamiento',
-                                required: true,
-                              },
-                              {
-                                name: 'final_amount',
-                                label: 'Importe final acordado (HNL)',
-                                type: 'number',
-                                min: '0',
-                                step: '0.01',
-                                required: (v) => v.treatment === 'IMPORTE_FINAL',
-                                when: (v) => v.treatment === 'IMPORTE_FINAL',
-                              },
-                            ]
-                          : []),
-                      ],
-                      {},
-                      (v) => ({
-                        reason: v.reason,
-                        ...(v.treatment ? { treatment: v.treatment } : {}),
-                        ...(v.treatment === 'IMPORTE_FINAL'
-                          ? { final_amount: v.final_amount }
-                          : {}),
-                      }),
-                      undefined,
-                      undefined,
-                      <CancellationSummary record={c} />,
-                      (values) => <CancellationPreview record={c} values={values} />,
-                    )
-                  }
-                >
-                  Anular trabajo
-                </button>
-              )}
+              {can(user, 'production') &&
+                c.lifecycle !== 'Completado' &&
+                !p.cancelled_at &&
+                c.delivery_status !== 'Completa' && (
+                  <button
+                    className="danger"
+                    onClick={() =>
+                      operation(
+                        'production/cancel',
+                        'Anular trabajo',
+                        [
+                          { ...reason, label: 'Motivo de anulación' },
+                          ...(finance && can(user, 'adjust')
+                            ? [
+                                {
+                                  name: 'treatment',
+                                  label: 'Tratamiento económico',
+                                  options: [
+                                    { value: 'SIN_CARGO', label: 'Sin cargo por cancelación' },
+                                    {
+                                      value: 'IMPORTE_FINAL',
+                                      label: 'Con importe final acordado a cobrar',
+                                    },
+                                  ],
+                                  empty: 'Seleccionar tratamiento',
+                                  required: true,
+                                },
+                                {
+                                  name: 'final_amount',
+                                  label: 'Importe final acordado (HNL)',
+                                  type: 'number',
+                                  min: '0',
+                                  step: '0.01',
+                                  required: (v) => v.treatment === 'IMPORTE_FINAL',
+                                  when: (v) => v.treatment === 'IMPORTE_FINAL',
+                                },
+                              ]
+                            : []),
+                        ],
+                        {},
+                        (v) => ({
+                          reason: v.reason,
+                          ...(v.treatment ? { treatment: v.treatment } : {}),
+                          ...(v.treatment === 'IMPORTE_FINAL'
+                            ? { final_amount: v.final_amount }
+                            : {}),
+                        }),
+                        undefined,
+                        undefined,
+                        <CancellationSummary record={c} />,
+                        (values) => <CancellationPreview record={c} values={values} />,
+                      )
+                    }
+                  >
+                    Anular trabajo
+                  </button>
+                )}
               {p.cancelled_at &&
                 p.cancellation_review_pending &&
                 finance &&
@@ -478,13 +524,18 @@ export default function CasePage({ user, print = false }) {
             </Panel>
           )}
           {section === 'Entregas y cobros' && p && (
-            <DeliveryFinance record={c} user={user} finance={finance} onOperation={operation} />
+            <DeliveryFinance
+              record={c}
+              user={user}
+              finance={finance && c.lifecycle !== 'Completado'}
+              onOperation={operation}
+            />
           )}
           {section === 'Archivos' && (
             <Panel
               title="Archivos del expediente"
               action={
-                (attention || (production && p)) && (
+                (activeAttention || (production && p && c.lifecycle !== 'Completado')) && (
                   <button onClick={() => setModal({ type: 'upload' })}>
                     <Paperclip size={15} />
                     Adjuntar archivo
@@ -546,7 +597,7 @@ export default function CasePage({ user, print = false }) {
           <Panel
             title="Próxima acción"
             action={
-              attention && (
+              activeAttention && (
                 <button
                   className="icon-button"
                   aria-label="Programar seguimiento"
@@ -591,14 +642,40 @@ export default function CasePage({ user, print = false }) {
                 ) : (
                   <>
                     {new Date(t.due_at) < new Date() && <Badge tone="red">Vencido</Badge>}
-                    {attention && (
+                    {activeAttention && (
                       <>
                         <button
                           onClick={() =>
-                            operation(`tasks/${t.id}/complete`, 'Completar seguimiento')
+                            operation(
+                              `tasks/${t.id}/complete`,
+                              t.category === 'PICKUP'
+                                ? 'Registrar contacto de recogida'
+                                : 'Completar seguimiento',
+                              t.category === 'PICKUP'
+                                ? [
+                                    {
+                                      name: 'note',
+                                      label: 'Resumen del contacto',
+                                      type: 'textarea',
+                                    },
+                                    {
+                                      name: 'schedule_next_pickup',
+                                      label:
+                                        'Programar otro seguimiento en siete días si no se recoge',
+                                      type: 'checkbox',
+                                    },
+                                  ]
+                                : [],
+                              { schedule_next_pickup: false },
+                              (values) => ({
+                                note: values.note || '',
+                                schedule_next_pickup: Boolean(values.schedule_next_pickup),
+                              }),
+                              'Guardar contacto',
+                            )
                           }
                         >
-                          Completar
+                          {t.category === 'PICKUP' ? 'Registrar contacto' : 'Completar'}
                         </button>
                         <button
                           onClick={() =>
@@ -655,6 +732,36 @@ export default function CasePage({ user, print = false }) {
         </aside>
       </div>
       {modal?.type === 'operation' && <Operation {...modal} record={c} onClose={close} />}{' '}
+      {modal?.type === 'complete' && (
+        <FormDialog
+          title="Completar caso"
+          initial={{}}
+          submit="Completar caso"
+          canSubmit={completionBlockers.length === 0}
+          onClose={close}
+          onSave={() => changeLifecycle('complete')}
+          render={() => (
+            <div className="notice">
+              <p>
+                El expediente dejará las bandejas activas y seguirá disponible en el historial y
+                perfil del cliente.
+              </p>
+              {completionBlockers.length > 0 ? (
+                <>
+                  <strong>Resuelve estos pendientes antes de completar:</strong>
+                  <ul>
+                    {completionBlockers.map((item, index) => (
+                      <li key={index}>{item}</li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p>Completar no modifica producción, entregas ni pagos.</p>
+              )}
+            </div>
+          )}
+        />
+      )}
       {(modal?.type === 'quote' || modal?.type === 'convert') && (
         <ProductForm
           record={c}

@@ -83,6 +83,9 @@ class Case(Base):
     mode = Column(String(20), nullable=False, default='Atención', index=True)
     next_action = Column(String(500), nullable=False, default='')
     pending_message = Column(Boolean, nullable=False, default=False)
+    lifecycle = Column(String(20), nullable=False, default='Activo', server_default='Activo', index=True)
+    completed_at = Column(DateTime)
+    completed_by_id = Column(ForeignKey('users.id'))
     closed_at = Column(DateTime)
     close_reason = Column(Text)
     close_summary = Column(Text)
@@ -108,7 +111,8 @@ class Task(Base):
     __tablename__ = 'tasks'
     id = Column(Integer, primary_key=True)
     case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
-    owner_id = Column(ForeignKey('users.id'), nullable=False)
+    owner_id = Column(ForeignKey('users.id'))
+    category = Column(String(20), nullable=False, default='GENERAL', server_default='GENERAL')
     title = Column(String(500), nullable=False)
     due_at = Column(DateTime, nullable=False, index=True)
     done_at = Column(DateTime)
@@ -271,7 +275,9 @@ class ProviderInbox(Base):
 
 
 Index('ix_case_pool', Case.status, Case.owner_id)
+Index('ix_case_lifecycle_owner', Case.lifecycle, Case.owner_id)
 Index('ix_task_due_open_case', Task.done_at, Task.due_at, Task.case_id)
+Index('ix_task_category_open_case', Task.category, Task.done_at, Task.case_id)
 Index('ix_ledger_due_case', Ledger.due_date, Ledger.case_id)
 Index('ix_delivery_case_item', Delivery.case_id, Delivery.item_id)
 Index('ix_production_active_stage', Production.cancelled_at, Production.stage, Production.case_id)

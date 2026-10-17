@@ -55,6 +55,16 @@ def attention(case_id: int, data: s.CaseUpdate, user=Depends(current_user), db=D
     return case_response(db, user, service.update_case(db, user, case_id, data))
 
 
+@router.post('/cases/{case_id}/complete')
+def complete_case(case_id: int, data: s.CaseLifecycleInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_response(db, user, service.complete_case(db, user, case_id, data))
+
+
+@router.post('/cases/{case_id}/reactivate')
+def reactivate_case(case_id: int, data: s.CaseLifecycleInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_response(db, user, service.reactivate_case(db, user, case_id, data))
+
+
 @router.post('/cases/{case_id}/details')
 def details(case_id: int, data: s.CaseDetailsInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_response(db, user, service.update_case_details(db, user, case_id, data))
@@ -71,7 +81,7 @@ def tasks(case_id: int, data: s.TaskInput, user=Depends(current_user), db=Depend
 
 
 @router.post('/cases/{case_id}/tasks/{task_id}/complete')
-def complete(case_id: int, task_id: int, data: s.Mutation, user=Depends(current_user), db=Depends(get_db, scope='function')):
+def complete(case_id: int, task_id: int, data: s.TaskCompletionInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_response(db, user, service.complete_task(db, user, case_id, task_id, data))
 
 
@@ -116,7 +126,8 @@ def save_view(data: s.ViewInput, user=Depends(current_user), db=Depends(get_db, 
 @router.put('/cases/{case_id}/drafts/{channel}')
 def draft(case_id: int, channel: str, data: s.DraftInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'attention')
-    get_case(db, user, case_id, lock=True)
+    case = get_case(db, user, case_id, lock=True)
+    if case.lifecycle == 'Completado': raise HTTPException(409, 'Reactiva el caso antes de guardar borradores nuevos')
     if channel not in ('Nota', 'Llamada', 'Visita', 'Correo', 'WhatsApp'): raise HTTPException(422, 'Canal no reconocido')
     draft = db.scalar(select(Draft).where(Draft.case_id == case_id, Draft.user_id == user.id, Draft.channel == channel))
     if draft and draft.version != data.version: raise HTTPException(409, 'El borrador cambió en otra sesión')

@@ -142,7 +142,7 @@ export default function App() {
     ['/inbox/production', 'Producción', Printer],
     ['/inbox/ready', 'Entregas y cobros', Truck],
     ['/calendar', 'Calendario', CalendarDays],
-    ['/inbox/finalized', 'Finalizados', CheckCheck],
+    ['/inbox/finalized', 'Completados', CheckCheck],
     ['/inbox/history', 'Historial', History],
     ...(can(user, 'reports') ? [['/indicators', 'Indicadores', ChartNoAxesCombined]] : []),
     ['/settings', 'Configuración', SettingsIcon],

@@ -164,6 +164,8 @@ def case_summary(db, user, case):
 
 def case_detail(db, user, case):
     result = case_summary(db, user, case)
+    from .security import can
+    result['completion_blockers'] = case_completion_blockers(db, case, show_finances=can(db, user, 'finance') or can(db, user, 'attention'))
     commercial = can(db, user, 'attention') or can(db, user, 'finance')
     for name, model in [('events', Event), ('tasks', Task), ('items', Item), ('attachments', Attachment), ('deliveries', Delivery)]:
         objects = db.scalars(select(model).where(model.case_id == case.id).order_by(model.id))
@@ -178,18 +180,58 @@ def case_detail(db, user, case):
     return result
 
 
+def case_completion_blockers(db, case, *, show_finances=True):
+    """Return actionable blockers for explicit case completion; never mutate related work."""
+    blockers = []
+    production = db.get(Production, case.id)
+    if production:
+        if production.cancellation_review_pending:
+            blockers.append('La anulación de producción requiere resolución económica.')
+        if not production.cancelled_at and delivery_status(db, case.id) != 'Completa':
+            items = db.scalars(select(Item).where(Item.case_id == case.id).order_by(Item.id)).all()
+            remaining = []
+            for item in items:
+                delivered = db.scalar(select(func.coalesce(func.sum(Delivery.quantity), 0)).where(Delivery.item_id == item.id)) or 0
+                quantity_left = item.quantity - delivered
+                if quantity_left > 0:
+                    remaining.append(f'Falta entregar {quantity_text(quantity_left)} {item.unit} de {item.product}.')
+            blockers.extend(remaining or ['La producción sigue activa y pendiente de entrega.'])
+        current_balance = Decimal(balance(db, case.id)['balance'])
+        if current_balance > 0:
+            amount = f"{current_balance:,.2f}" if show_finances else ''
+            blockers.append(f"Quedan {production.currency} {amount} por cobrar." if show_finances else 'Queda un saldo por cobrar.')
+        elif current_balance < 0:
+            amount = f"{abs(current_balance):,.2f}" if show_finances else ''
+            blockers.append(f"Hay {production.currency} {amount} pendientes de devolución." if show_finances else 'Hay una devolución o saldo a favor pendiente.')
+    open_tasks = db.scalars(select(Task).where(Task.case_id == case.id, Task.done_at.is_(None)).order_by(Task.due_at, Task.id)).all()
+    for task in open_tasks:
+        blockers.append(f"Hay un seguimiento pendiente para el {task.due_at.date().isoformat()}: {task.title}.")
+    if case.pending_message:
+        blockers.append('Hay una comunicación entrante pendiente de atender.')
+    if not production:
+        open_quotes = db.scalars(select(Quote).where(Quote.case_id == case.id, Quote.status.in_(('Pendiente', 'Aceptada'))).order_by(Quote.version)).all()
+        for quote in open_quotes:
+            blockers.append(f"La cotización COT-{quote.id:05d}, versión {quote.version}, aún requiere una decisión o gestión.")
+    return blockers
+
+
 def case_query(db, user, filters):
     view = filters.get('view', 'pool')
     predicates = attention_predicates()
     total, overdue, payment = financial_expressions()
     delivery_state = sql_case((predicates['complete_delivery'], 'Completa'), (predicates['has_delivery'], 'Parcial'), else_='Pendiente')
-    query = select(Case, Client, User, Production, delivery_state, total, overdue, payment, predicates['requires_action']).join(Client, Client.id == Case.client_id).outerjoin(User, User.id == Case.owner_id).outerjoin(Production, Production.case_id == Case.id).where(visibility(db, user))
+    received = func.coalesce(select(func.sum(sql_case((Ledger.kind.in_(('Anticipo', 'Abono', 'Reversión de pago', 'Devolución')), -Ledger.amount), else_=0))).where(Ledger.case_id == Case.id).correlate(Case).scalar_subquery(), 0)
+    query = select(Case, Client, User, Production, delivery_state, total, overdue, payment, predicates['requires_action'], received).join(Client, Client.id == Case.client_id).outerjoin(User, User.id == Case.owner_id).outerjoin(Production, Production.case_id == Case.id).where(visibility(db, user))
+    if view not in ('history', 'all', 'finalized'):
+        query = query.where(Case.lifecycle == 'Activo')
+    elif view == 'finalized':
+        query = query.where(Case.lifecycle == 'Completado')
     financial = can(db, user, 'finance') or can(db, user, 'attention')
     if (view in ('balances', 'overdue', 'refunds', 'cancellation-review') or filters.get('payment')) and not financial:
         raise HTTPException(403, 'No tienes acceso a los saldos')
     if view == 'pool': query = query.where(Case.owner_id.is_(None), predicates['requires_action'])
     elif view == 'action': query = query.where(predicates['requires_action'])
-    elif view == 'mine': query = query.where(Case.owner_id == user.id, predicates['pending_assignment'])
+    elif view == 'mine': query = query.where(Case.owner_id == user.id, Case.lifecycle == 'Activo')
     elif view == 'production': query = query.where(Production.case_id.is_not(None), Production.cancelled_at.is_(None), not_(predicates['complete_delivery']))
     elif view == 'ready': query = query.where(Production.stage == 'READY', Production.classification_required.is_(False), Production.cancelled_at.is_(None), not_(predicates['complete_delivery']))
     elif view == 'balances': query = query.where(total > 0, not_(predicates['cancellation_review']))
@@ -197,11 +239,7 @@ def case_query(db, user, filters):
     elif view == 'cancellation-review': query = query.where(predicates['cancellation_review'])
     elif view == 'overdue': query = query.where(overdue > 0)
     elif view == 'history': pass
-    elif view == 'finalized':
-        no_open_task = not_(predicates['pending_task'])
-        production_final = and_(Production.case_id.is_not(None), or_(and_(predicates['complete_delivery'], Production.cancelled_at.is_(None)), and_(Production.cancelled_at.is_not(None), not_(predicates['cancellation_review']))), total == 0, no_open_task, Case.pending_message.is_(False), Case.status == 'Cerrado')
-        consultation_final = and_(Production.case_id.is_(None), Case.status == 'Cerrado', no_open_task, Case.pending_message.is_(False))
-        query = query.where(or_(production_final, consultation_final))
+    elif view == 'finalized': pass
     elif view == 'all': pass
     else: raise HTTPException(422, 'Bandeja no reconocida')
     if filters.get('client_id'):
@@ -210,6 +248,7 @@ def case_query(db, user, filters):
         if client_id < 1: raise HTTPException(422, 'client_id debe ser positivo')
         query = query.where(Case.client_id == client_id)
     if filters.get('status'): query = query.where(Case.status == filters['status'])
+    if filters.get('lifecycle') in ('Activo', 'Completado'): query = query.where(Case.lifecycle == filters['lifecycle'])
     if filters.get('mode'): query = query.where(Case.mode == filters['mode'])
     if filters.get('priority'): query = query.where(Case.priority == filters['priority'])
     if filters.get('stage'): query = query.where(Production.stage == filters['stage'])
@@ -229,12 +268,15 @@ def case_query(db, user, filters):
     ordering = filters.get('sort', 'newest')
     if ordering == 'oldest': query = query.order_by(Case.created_at.asc(), Case.id.asc())
     elif ordering == 'due': query = query.order_by(sql_case((Production.committed_date.is_(None), 1), else_=0), Production.committed_date.asc(), Case.id.asc())
+    elif view == 'ready':
+        payment_group = sql_case((received <= 0, 0), (total == 0, 2), (total < 0, 3), else_=1)
+        query = query.order_by(payment_group.asc(), Production.stage_started_at.asc(), Case.id.asc())
     else: query = query.order_by(Case.created_at.desc(), Case.id.desc())
     return query
 
 
 def _case_projection(db, user, entry, financial):
-    case, client, owner, production, delivery_state, total, overdue, payment, requires_action = entry
+    case, client, owner, production, delivery_state, total, overdue, payment, requires_action, received = entry
     result = row(case)
     result['number'] = f'CG-{case.id:06d}'
     result['client'] = row(client, ('search_text',))
@@ -243,13 +285,22 @@ def _case_projection(db, user, entry, financial):
     result['delivery_status'] = delivery_state
     result['requires_action'] = bool(requires_action)
     result['attention_status_label'] = case.status
+    result['lifecycle'] = case.lifecycle
+    result['completed_at'] = row(case)['completed_at']
+    result['completed_by_id'] = case.completed_by_id
     if production:
         result['production']['stage_label'] = STAGE_LABELS.get(production.stage)
         if production.classification_required: result['production']['stage_label'] = 'Pendiente de clasificación'
         if delivery_state == 'Completa': result['production']['result_label'] = 'Entregado'
         result['production']['active_elapsed_seconds'] = None if production.cancelled_at or delivery_state == 'Completa' or production.classification_required else max(0, (now() - production.stage_started_at).total_seconds())
+        if production.stage == 'READY':
+            ready_seconds = max(0, (now() - production.stage_started_at).total_seconds())
+            result['production']['ready_days'] = int(ready_seconds // 86400)
+            result['production']['ready_at'] = row(production)['stage_started_at']
     if financial:
-        result.update({'balance': str(total), 'overdue_balance': str(overdue), 'payment_status': payment})
+        result.update({'balance': str(total), 'overdue_balance': str(overdue), 'payment_status': payment, 'received_amount': str(received)})
+        if production and production.stage == 'READY':
+            result['pickup_payment_status'] = 'Sin anticipo' if received <= 0 else 'Pagado' if total == 0 else 'A favor' if total < 0 else 'Con anticipo'
     elif production:
         for key in ('price', 'advance_required', 'payment_terms', 'payment_due_date'): result['production'].pop(key, None)
         for snap in ('approved_snapshot', 'specs_snapshot'):

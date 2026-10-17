@@ -63,7 +63,7 @@ async def guard(request: Request, call_next):
         if request.headers.get('X-Comgraf-Request') != '1':
             return JSONResponse({'detail': 'Solicitud de origen no autorizado'}, 403)
         contract = request.headers.get('X-Comgraf-Contract')
-        if contract != '2':
+        if contract != '3':
             return JSONResponse({'detail': 'Contrato HTTP incompatible. Actualiza la interfaz y reinicia Comgraf.', 'code': 'CLIENT_CONTRACT_MISMATCH'}, 409)
         origin = request.headers.get('origin')
         if origin and urlparse(origin).netloc != request.headers.get('host'):
@@ -113,7 +113,7 @@ def health():
 
 @app.get('/api/version')
 def version():
-    return {'product': 'Comgraf', 'product_version': settings.product_version, 'build': settings.build_id, 'contract_version': '2'}
+    return {'product': 'Comgraf', 'product_version': settings.product_version, 'build': settings.build_id, 'contract_version': '3'}
 
 
 static = Path(settings.static_dir)

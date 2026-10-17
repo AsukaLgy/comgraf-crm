@@ -68,3 +68,13 @@ La pantalla explica sus denominadores: conversión de casos sobre todos los caso
 `repository.py` construye filtros compartidos para página y contador, aplica orden con desempate por ID y pagina en MySQL. Usa agregaciones y expresiones correlacionadas para saldos y existencia de tareas; las filas no cargan bitácora, adjuntos ni especificaciones. Índices de tareas vencidas, vencimientos de ledger, etapa de producción y fechas de entrega respaldan los filtros. La recuperación de seguimientos se ejecuta al iniciar y cada 60 segundos en el proceso FastAPI; un cierre concurrente usa versión para no ocultar una interacción nueva.
 
 No se implementó WebSocket, sincronización sin conexión, multitenencia, fiscalidad ni publicación en Internet.
+
+## Ciclo de vida y recogida
+
+El estado de atencion y el ciclo de vida son independientes. Un caso puede seguir Activo con atencion Cerrada; Completar caso es una accion manual y atomica, y solo procede cuando no quedan trabajos sin entregar, saldos, devoluciones, revisiones de anulacion, tareas abiertas ni interacciones entrantes pendientes. El servidor devuelve los pendientes concretos y no los resuelve por su cuenta. Reactivar conserva produccion, pagos, entregas y eventos anteriores. Los registros previos quedan Activos en la migracion 007, sin archivado por inferencia.
+
+Al entrar en Listo para entregar se crea una unica tarea PICKUP a siete dias, asignada al propietario principal si existe. La tarea se puede reprogramar; al resolver un contacto se puede crear el siguiente recordatorio semanal. Entrega parcial mantiene la tarea y la entrega completa resuelve solo las tareas PICKUP. La situacion de pago se calcula desde el ledger y nunca se deduce de Contado ni del tiempo que lleva sin recogerse.
+
+Las notas, incluidos los resumenes de llamada o visita, son internas. Correo y WhatsApp permanecen sin configurar; su interfaz no envia mensajes. Las comunicaciones manuales historicas de llamada y visita siguen visibles. La conversion registra referencias estructuradas de OP y la version exacta COT; la interfaz enlaza ambas dentro del mismo caso y aplica sus permisos.
+
+El contrato HTTP pasa a version 3 porque cambia el contrato de eventos y se agregan las acciones de ciclo de vida y seguimientos de recogida. Version de producto 1.2.0; actualiza frontend, aplica Alembic y reinicia FastAPI mediante el procedimiento de actualizacion.

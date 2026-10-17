@@ -17,6 +17,11 @@ export default function CaseAttention({
   attentionBusy,
   onRefresh,
   onEdit,
+  onComplete,
+  onReactivate,
+  canComplete,
+  completionBusy,
+  canReactivate,
 }) {
   return (
     <>
@@ -25,6 +30,7 @@ export default function CaseAttention({
           <div className="eyebrow">
             EXPEDIENTE {record.number}{' '}
             <Badge tone={record.production ? 'teal' : ''}>{record.mode}</Badge>
+            {record.lifecycle === 'Completado' && <Badge tone="teal">Completado</Badge>}
           </div>
           <h1>{record.subject}</h1>
           <div className="case-meta">
@@ -54,6 +60,22 @@ export default function CaseAttention({
               {record.status === 'Cerrado' ? 'Abrir atención' : 'Cerrar atención'}
             </button>
           )}
+          {canAttend && record.lifecycle !== 'Completado' && (
+            <button
+              onClick={onComplete}
+              disabled={completionBusy}
+              title={
+                !canComplete ? 'Revisa los pendientes para ver qué falta resolver.' : undefined
+              }
+            >
+              Completar caso
+            </button>
+          )}
+          {canReactivate && record.lifecycle === 'Completado' && (
+            <button className="primary" onClick={onReactivate} disabled={completionBusy}>
+              Reactivar caso
+            </button>
+          )}
           {record.production && (
             <Link className="button" to={`/cases/${record.id}/print`}>
               <Printer size={16} />
@@ -63,6 +85,11 @@ export default function CaseAttention({
         </div>
       </section>
       <div className="status-strip">
+        {record.lifecycle === 'Completado' && (
+          <span>
+            Completado {date(record.completed_at)} · {person(record.completed_by_id)}
+          </span>
+        )}
         <Badge>{record.status}</Badge>
         <Badge tone={record.priority === 'Urgente' ? 'red' : ''}>{record.priority}</Badge>
         <span>

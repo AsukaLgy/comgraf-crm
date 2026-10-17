@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 const credentials = JSON.parse(fs.readFileSync(path.resolve('../.runtime/e2e.json'), 'utf8'))
-const headers = { 'X-Comgraf-Request': '1', 'X-Comgraf-Contract': '2', 'X-Comgraf-Build': '1.1.0' }
+const headers = { 'X-Comgraf-Request': '1', 'X-Comgraf-Contract': '3', 'X-Comgraf-Build': '1.2.0' }
 let errors = []
 test.beforeEach(async ({ page }) => {
   errors = []
@@ -116,25 +116,35 @@ test('anular con importe final calcula devolución y registra devolución real',
   expect(final.ledger.filter((entry) => entry.kind === 'Devolución')).toHaveLength(1)
 })
 
-test('consulta presencial, notas, seguimiento y cierre sin producción', async ({ page }) => {
-  await createCase(page, 'E2E Consulta presencial sin producción')
-  await expect(page.getByLabel('Etapas de producción')).toHaveCount(0)
-  await page.getByRole('tab', { name: 'Visita', exact: true }).click()
+test('manual consultation can be closed and explicitly completed', async ({ page }) => {
+  const record = await createCase(page, 'E2E consultation without production')
+  await expect(page.getByLabel(/Etapas de producci/)).toHaveCount(0)
+  await page.getByRole('tab', { name: 'Notas', exact: true }).click()
   await page
-    .getByLabel('Registro de interacción')
-    .fill('Atendimos la consulta presencial; no necesita fabricación.')
-  await page.getByRole('button', { name: 'Registrar interacción manual' }).click()
+    .getByLabel('Nota interna', { exact: true })
+    .fill('Consultation handled; no production needed.')
+  await page.getByRole('button', { name: 'Guardar nota', exact: true }).click()
   await expect(
-    page.getByText('Atendimos la consulta presencial; no necesita fabricación.', { exact: true }),
+    page.getByText('Consultation handled; no production needed.', { exact: true }),
   ).toBeVisible()
-  await page.getByRole('button', { name: 'Cerrar atención', exact: true }).click()
-  await expect(page.getByText('Cerrado', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Abrir atención' })).toBeVisible()
-  await page.reload()
-  await expect(page.getByText('Cerrado', { exact: true })).toBeVisible()
-  await expect(page.getByLabel('Etapas de producción')).toHaveCount(0)
+  await page.getByRole('button', { name: /Cerrar atenci/ }).click()
+  await page.getByRole('button', { name: 'Completar caso', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText(/expediente/)).toBeVisible()
+  await dialog.getByRole('button', { name: 'Completar caso', exact: true }).click()
+  await expect(page.getByText('Completado', { exact: true }).first()).toBeVisible()
+  const completed = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  expect(completed.lifecycle).toBe('Completado')
+  await page.getByRole('button', { name: 'Reactivar caso', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Completar caso', exact: true })).toBeVisible()
+  const current = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  expect(current.lifecycle).toBe('Activo')
+  expect(
+    current.events.filter((event) =>
+      ['case_completed', 'case_reactivated'].includes(event.data.action),
+    ),
+  ).toHaveLength(2)
 })
-
 test('borradores por canal sobreviven navegación y recarga', async ({ page }) => {
   const record = await createCase(page, 'E2E Borradores por canal')
   await page.getByLabel('Nota interna', { exact: true }).fill('Nota interna que nunca debe salir')
@@ -143,7 +153,7 @@ test('borradores por canal sobreviven navegación y recarga', async ({ page }) =
   await page.getByRole('tab', { name: 'WhatsApp', exact: true }).click()
   await page.getByLabel('Registro de interacción').fill('Borrador de WhatsApp sin enviar')
   await expect(page.getByText(/WhatsApp no configurado/)).toBeVisible()
-  await page.getByRole('tab', { name: 'Nota interna', exact: true }).click()
+  await page.getByRole('tab', { name: 'Notas', exact: true }).click()
   await expect(page.getByLabel('Nota interna', { exact: true })).toHaveValue(
     'Nota interna que nunca debe salir',
   )
@@ -364,6 +374,18 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   await dialog.getByLabel('Modalidad de entrega').fill('Retiro en taller')
   await dialog.getByRole('button', { name: /Generar orden de producción/ }).click()
   await expect(page).toHaveURL(new RegExp('/cases/' + record.id + '$'))
+  await page.reload()
+  await page.getByRole('button', { name: 'Actividad', exact: true }).click()
+  const orderLink = page.getByRole('link', { name: /Orden OP-/ })
+  await expect(orderLink).toBeVisible()
+  await orderLink.click()
+  await expect(page.getByRole('heading', { name: 'Especificaciones de producción' })).toBeVisible()
+  await page.getByRole('button', { name: 'Actividad', exact: true }).click()
+  const quoteLink = page.getByRole('link', { name: /COT-.*versi/ })
+  await expect(quoteLink).toBeVisible()
+  await quoteLink.click()
+  const converted = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  await expect(page.locator(`#quote-${converted.quotes[0].id}`)).toBeVisible()
   await page.getByRole('button', { name: 'Entregas y cobros' }).click()
   await page.getByRole('button', { name: 'Registrar abono' }).click()
   dialog = page.getByRole('dialog')
@@ -457,4 +479,18 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   expect(finalRecord.balance).toBe('0.00')
   expect(finalRecord.payment_status).toBe('Pagado')
   expect(finalRecord.ledger.filter((entry) => entry.kind === 'Abono')).toHaveLength(2)
+})
+
+test('note template appends to an existing internal draft', async ({ page }) => {
+  await createCase(page, 'E2E note template')
+  const editor = page.getByLabel('Nota interna', { exact: true })
+  await editor.fill('Existing internal note.')
+  await page.getByRole('button', { name: 'Usar plantilla' }).click()
+  await page.getByLabel('Plantilla').selectOption('Seguimiento de recogida')
+  await page.getByLabel('Medio de contacto').fill('WhatsApp manual')
+  await page.getByLabel('Respuesta').fill('Customer will pick up Friday')
+  await page.getByRole('button', { name: /la nota/ }).click()
+  await expect(editor).toHaveValue(
+    /Existing internal note\.[\s\S]*Medio de contacto: WhatsApp manual[\s\S]*Customer will pick up Friday/,
+  )
 })

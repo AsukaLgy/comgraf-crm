@@ -122,7 +122,7 @@ class TaskReschedule(Mutation):
 
 class EventInput(Mutation):
     kind: Literal['Nota interna', 'Interacción manual']
-    channel: Literal['Nota', 'Llamada', 'Visita', 'Correo', 'WhatsApp']
+    channel: Literal['Nota', 'Correo', 'WhatsApp']
     body: str = Field(min_length=1, max_length=20000)
     direction: Literal['Entrante', 'Saliente', 'Interna'] = 'Interna'
 
@@ -138,6 +138,15 @@ class TaskInput(Mutation):
         if value.tzinfo is None:
             raise ValueError('Incluir zona horaria en la fecha')
         return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+class TaskCompletionInput(Mutation):
+    note: str = Field(default='', max_length=20000)
+    schedule_next_pickup: bool = False
+
+
+class CaseLifecycleInput(Mutation):
+    pass
 
 
 class Specs(Input):

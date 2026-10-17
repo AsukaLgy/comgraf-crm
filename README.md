@@ -89,7 +89,7 @@ Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vit
 ## Recorrido de trabajo
 
 1. Crear cliente provisional (basta un nombre); agregar contactos y datos comerciales cuando se conozcan.
-2. Crear caso y tomarlo desde el pool. Registrar notas, visitas, llamadas o conversaciones externas; programar seguimientos. Cerrar atención retira el caso de acción inmediata, pero no cierra trabajo ni cobranza: «Cerrar atención retira el caso de pendientes inmediatos; el trabajo y sus cobros continúan».
+2. Crear caso y tomarlo desde el pool. Registrar notas internas con plantillas; resumir llamadas, visitas, acuerdos y comentarios en una sola bitacora; programar seguimientos. Cerrar atención retira el caso de acción inmediata, pero no cierra trabajo ni cobranza: «Cerrar atención retira el caso de pendientes inmediatos; el trabajo y sus cobros continúan».
 3. Preparar cotización con partidas y vigencia. Registrar aceptación/rechazo de una versión. Generar orden reutiliza esa versión y conserva el expediente.
 4. Generar orden activa el mismo expediente en Nuevo. Avanzar por Nuevo → Aprobación → Impresión → Taller → Listo para entregar. Aprobación es revisión operativa con el cliente, sin autorización interna separada.
 5. Programar el inicio y compromiso de entrega de forma independiente; el evento conserva fechas anteriores y nuevas, usuario y hora. El avance normal no exige motivo; bloqueos y retrocesos sí.
@@ -111,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start-local.ps1
 
 El actualizador comprueba la configuración, instala dependencias solo si cambiaron sus archivos de bloqueo (o con `-ForceDependencies`), compila React y aplica Alembic. Si algo falla, se detiene. Conserva `.env`, MySQL y los adjuntos; no borres `.runtime`.
 
-`/api/version` identifica versión de producto, build y contrato HTTP. Builds distintos no implican incompatibilidad por sí solos. Las operaciones de escritura exigen contrato 2. Ante incompatibilidad, ejecuta la actualización anterior y reinicia Python. El HTML exige revalidación y los assets conservan nombres versionados.
+`/api/version` identifica versión de producto, build y contrato HTTP. Builds distintos no implican incompatibilidad por sí solos. Las operaciones de escritura exigen contrato HTTP 3. Ante incompatibilidad, ejecuta la actualización anterior y reinicia Python. El HTML exige revalidación y los assets conservan nombres versionados.
 
 Las migraciones `005_commercial_cancellation` y `006_cancelled_stage_snapshot` agregan trazabilidad y marcan anulaciones existentes para revisión; no cambian pagos, saldos ni etapas sin clasificar, y no se editan después de aplicadas. Las anulaciones antiguas requieren revisión explícita; no se ponen en cero automáticamente.
 
@@ -189,3 +189,7 @@ Las migraciones se aplican en orden con `alembic upgrade head`; la migración 00
 Las nuevas operaciones se registran en HNL. Los importes históricos en USD se conservan, sin conversión automática; una cotización antigua en USD debe revisarse con precios HNL antes de generar una orden.
 
 Las migraciones 003/004 incorporan el flujo de atención y producción descrito en [ARQUITECTURA](docs/ARQUITECTURA.md) y vuelven a abrir atenciones que ya tenían seguimientos vencidos. Antes de actualizar, respalda la base y adjuntos; aplica con `alembic upgrade head` (Compose lo hace al arrancar). Preparación y Listo para entregar se clasifican inequívocamente en Nuevo y Listo. Etapas intermedias ambiguas conservan el original en `legacy_stage`, quedan pendientes de clasificación manual y no reciben tiempos históricos inventados. Las migraciones no eliminan expedientes, entregas ni pagos. Sus downgrades se rechazan porque restaurar estados anteriores exigiría adivinar: para volver atrás restaura conjuntamente el respaldo de base y archivos.
+
+Los trabajos que llegan a Listo para entregar reciben un seguimiento de recogida a siete dias. Al registrar el contacto puede programarse otro recordatorio semanal; una entrega parcial lo conserva y una entrega completa resuelve solo ese seguimiento. Sin anticipo, con anticipo y pagado se distinguen por los movimientos reales.
+
+Cerrar atencion no completa el expediente. Completar caso es manual y solo se habilita cuando se resuelven entregas, cargos, devoluciones, tareas y comunicaciones pendientes; el expediente completo permanece en Historial y en el perfil del cliente. Reactivar conserva todos los movimientos y etapas. Las llamadas o visitas se resumen como notas internas; las entradas historicas siguen en la bitacora. Las plantillas solo aceleran la escritura y no crean tareas, pagos, entregas ni aprobaciones.

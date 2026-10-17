@@ -92,3 +92,13 @@ npm.cmd --prefix frontend run build
 ```
 
 Para E2E, seguir el procedimiento de `README.md`: sembrar credenciales aleatorias en `comgraf_test`, iniciar la app apuntando exclusivamente a esa base y ejecutar Playwright. La suite limpia datos de `_test`.
+
+## Completar casos y seguimientos de recogida
+
+`frontend/src/CaseAttention.jsx` presenta Completar/Reactivar y `frontend/src/CasePage.jsx` coordina las acciones y muestra `completion_blockers`. `backend/app/services.py` (`complete_case`, `reactivate_case`, `schedule_pickup_followup`, `complete_task`) contiene las transacciones; `backend/app/repository.py` calcula bloqueos, ciclo y proyecciones de bandeja. No dupliques las reglas en React.
+
+Las tareas de recogida usan `Task.category == PICKUP`; el vencimiento inicial es siete dias despues de entrar a READY. No crees una segunda tarea abierta al reintentar o volver a guardar READY. Una entrega completa resuelve unicamente tareas PICKUP. Al registrar contacto se puede marcar la tarea y, explicitamente, programar el siguiente control semanal.
+
+`frontend/src/Composer.jsx` conserva borradores antiguos de llamada/visita, pero ofrece como canales activos Notas, Correo y WhatsApp. Las plantillas solo escriben texto editable; no registran pagos, entregas, aprobaciones ni seguimientos. Las referencias estructuradas de conversion se muestran en `CaseActivity.jsx`; conserva sus permisos y el destino dentro del expediente.
+
+La migracion `007_case_completion_pickup` agrega ciclo de vida y tipo de tarea sin completar casos historicos. Aplicala con `alembic upgrade head`; no edites revisiones ya aplicadas. No reviertas automaticamente esta revision porque las tareas PICKUP y cambios de nulabilidad pueden contener actividad real.
