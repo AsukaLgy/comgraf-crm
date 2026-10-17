@@ -26,13 +26,13 @@ if (-not (Test-TcpPort 3307)) {
 }
 if (-not (Test-TcpPort 3307)) { throw 'MySQL no quedó disponible en 127.0.0.1:3307. Revisa .runtime/mysql.log; no se modificaron ni borraron los datos.' }
 
-$LockFiles = @('requirements.txt', 'backend/requirements-dev.txt', 'frontend/package-lock.json')
+$LockFiles = @('backend/requirements.lock.txt', 'backend/requirements-dev.txt', 'frontend/package-lock.json')
 $Fingerprint = ($LockFiles | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash }) -join ':'
 $FingerprintPath = Join-Path $Runtime 'dependency-fingerprint.txt'
 $PreviousFingerprint = if (Test-Path -LiteralPath $FingerprintPath) { Get-Content -Raw -LiteralPath $FingerprintPath } else { '' }
 $DependenciesChanged = $ForceDependencies -or ($PreviousFingerprint.Trim() -ne $Fingerprint) -or -not (Test-Path -LiteralPath 'frontend/node_modules')
 if ($DependenciesChanged) {
-    & '.venv/Scripts/python.exe' -m pip install -r requirements.txt -r backend/requirements-dev.txt
+    & '.venv/Scripts/python.exe' -m pip install -r backend/requirements.lock.txt -r backend/requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw 'Falló la actualización de dependencias Python.' }
     & 'npm.cmd' ci --prefix frontend
     if ($LASTEXITCODE -ne 0) { throw 'Falló la instalación de dependencias del frontend.' }
