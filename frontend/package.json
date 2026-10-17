@@ -1,0 +1,24 @@
+{
+  "name": "comgraf",
+  "version": "1.0.0",
+  "private": true,
+  "overrides": {"esbuild": "0.28.1"},
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.90.21",
+    "lucide-react": "0.577.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-router-dom": "7.18.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@vitejs/plugin-react": "5.1.4",
+    "vite": "7.3.7"
+  }
+}

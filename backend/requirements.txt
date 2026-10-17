@@ -1,0 +1,11 @@
+fastapi==0.135.1
+uvicorn==0.41.0
+SQLAlchemy==2.0.48
+alembic==1.18.4
+PyMySQL[rsa]==1.1.2
+pwdlib[argon2]==0.3.0
+python-multipart==0.0.22
+pydantic-settings==2.13.1
+tzdata==2025.3
+httpx==0.28.1
+pytest==9.0.2
