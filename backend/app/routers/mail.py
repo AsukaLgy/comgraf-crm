@@ -12,13 +12,14 @@ from .. import schemas as s, services as service
 from ..db import SessionLocal, get_db
 from ..mail_security import encrypt_password, decrypt_password
 from ..mail_service import (
-    account_projection, clean_address, pause_outbox_for_account, unclassified_messages,
+    account_projection, clean_address, pause_outbox_for_account, retry_sent_copy, unclassified_messages,
     _message_public,
 )
 from ..mail_transport import append_sent_copy, check_credentials, send_test_mail, status_label
 from ..models import Attachment, Case, Client, Event, MailAccount, MailAttachment, MailMessage, MailSyncCursor, Role, now
 from ..repository import get_case, row
 from ..security import can, current_user, require
+from ..mail_transport import MailFailure
 
 router = APIRouter(prefix='/api', tags=['Correo'])
 CASE_REF_RE = re.compile(r'\bCG-\d{6}\b', re.IGNORECASE)
@@ -43,13 +44,13 @@ def _status_from_results(result):
     statuses = {result['imap']['status'], result['smtp']['status']}
     if 'authentication_error' in statuses:
         return 'authentication_error'
-    if 'connection_error' in statuses:
-        return 'connection_error'
-    return 'protocol_error'
+    priority = ('dns_error', 'tls_error', 'timeout_error', 'inbox_select_error', 'inbox_query_error',
+                'inbox_metadata_error', 'connection_error')
+    return next((code for code in priority if code in statuses), 'protocol_error')
 
 
 def _configured_result(db):
-    return account_projection(_current_account(db) or _latest_account(db))
+    return account_projection(_current_account(db) or _latest_account(db), db)
 
 
 @router.get('/mail/config')
@@ -116,7 +117,6 @@ def save_mail_config(data: s.MailConfigurationInput, user=Depends(current_user),
     account.imap_status = 'connected'
     account.smtp_status = 'connected'
     account.last_error = None
-    account.last_sync_at = None
     db.add(account)
     db.flush()
 
@@ -127,7 +127,8 @@ def save_mail_config(data: s.MailConfigurationInput, user=Depends(current_user),
         cursor = MailSyncCursor(account_id=account.id, folder='INBOX', uidvalidity=checkpoint['uidvalidity'],
             last_uid=checkpoint['last_uid'], activated_at=now(), last_synced_at=None)
         db.add(cursor)
-    return {'saved': True, 'connection': result, 'account': account_projection(account)}
+    account.last_sync_at = cursor.last_synced_at
+    return {'saved': True, 'connection': result, 'account': account_projection(account, db)}
 
 
 @router.post('/mail/test')
@@ -196,7 +197,7 @@ def queue_email(case_id: int, data: s.MailSendInput, user=Depends(current_user),
     if case.lifecycle != 'Activo':
         raise HTTPException(409, 'Reactiva la solicitud antes de enviar un correo')
     account = _current_account(db, lock=True)
-    if not account or not account.encrypted_password or account_projection(account)['smtp_ready'] is not True:
+    if not account or not account.encrypted_password or account_projection(account, db)['smtp_ready'] is not True:
         raise HTTPException(409, 'El correo de la empresa no está conectado')
     recipients = _normalize_recipients(data.to)
     subject = data.subject.replace('\r', ' ').replace('\n', ' ').strip()
@@ -266,7 +267,7 @@ def retry_outbox(message_id: int, data: s.MailRetryInput, user=Depends(current_u
     if original.status == 'Resultado incierto' and not data.confirm_uncertain:
         raise HTTPException(409, 'Confirma que revisaste Yahoo antes de reenviar un resultado incierto')
     account = _current_account(db)
-    if not account or account.id != original.account_id or not account_projection(account)['configured']:
+    if not account or account.id != original.account_id or not account_projection(account, db)['configured']:
         raise HTTPException(409, 'Conecta la misma cuenta antes de reintentar este correo')
     retry = MailMessage(
         account_id=original.account_id, case_id=original.case_id, direction='Saliente', status='Pendiente',
@@ -280,6 +281,23 @@ def retry_outbox(message_id: int, data: s.MailRetryInput, user=Depends(current_u
     service.event(db, get_case(db, user, original.case_id), user, f'Reintento explícito del correo #{original.id}',
         kind='Sistema', channel='Sistema', data={'action': 'email_retry_created', 'email_message_id': retry.id, 'source_message_id': original.id})
     return _message_public(db, retry)
+
+
+@router.post('/mail/outbox/{message_id}/retry-copy')
+def retry_outbox_copy(message_id: int, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    require(db, user, 'attention')
+    original = db.get(MailMessage, message_id)
+    if not original or original.direction != 'Saliente' or not original.case_id:
+        raise HTTPException(404, 'Correo saliente no encontrado')
+    case = get_case(db, user, original.case_id)
+    _require_case_editor(db, user, case)
+    try:
+        status = retry_sent_copy(SessionLocal, message_id)
+    except MailFailure as exc:
+        if exc.code == 'account_disconnected':
+            raise HTTPException(409, 'Conecta de nuevo la misma cuenta Yahoo antes de guardar la copia')
+        raise HTTPException(409, 'La copia de este mensaje no está disponible para reintento')
+    return {'id': message_id, 'status': 'Aceptado por Yahoo', 'sent_copy_status': status}
 
 
 @router.get('/mail/pending')

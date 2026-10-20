@@ -71,7 +71,8 @@ export default function Composer({ record, user }) {
     queryKey: ['mail-outbox', outgoingId],
     queryFn: () => api(`/mail/outbox/${outgoingId}`),
     enabled: Boolean(outgoingId),
-    refetchInterval: (query) => ['Pendiente', 'Enviando'].includes(query.state.data?.status) ? 2000 : false,
+    refetchInterval: (query) => ['Pendiente', 'Enviando'].includes(query.state.data?.status)
+      || (query.state.data?.status === 'Aceptado por Yahoo' && query.state.data?.sent_copy_status === 'Pendiente') ? 2000 : false,
   })
   const versions = useRef(
     Object.fromEntries(record.drafts.map((draft) => [draft.channel, draft.version])),
@@ -252,6 +253,17 @@ export default function Composer({ record, user }) {
     finally { setBusy(false) }
   }
 
+  async function retrySentCopy() {
+    if (!outbox.data) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api(`/mail/outbox/${outbox.data.id}/retry-copy`, { method: 'POST', body: {} })
+      await outbox.refetch()
+    } catch (cause) { setError(cause) }
+    finally { setBusy(false) }
+  }
+
   return (
     <form className="composer" onSubmit={send}>
       <div className="tabs" role="tablist" aria-label="Canal de comunicación">
@@ -363,6 +375,7 @@ export default function Composer({ record, user }) {
       {outbox.data && <div className={`mail-send-result ${outbox.data.status === 'Error' || outbox.data.status === 'Resultado incierto' ? 'warning' : ''}`} role="status">
         <strong>{outbox.data.status}</strong>
         {outbox.data.status === 'Aceptado por Yahoo' && <p>Yahoo aceptó el mensaje. No hay evidencia de que el destinatario lo haya recibido o leído. Copia en Enviados: {outbox.data.sent_copy_status || 'pendiente'}.</p>}
+        {outbox.data.status === 'Aceptado por Yahoo' && outbox.data.sent_copy_status === 'Error' && <button type="button" onClick={retrySentCopy} disabled={busy}>Reintentar solo la copia en Enviados</button>}
         {outbox.data.status === 'Aceptado por Yahoo' && <button type="button" onClick={startAnotherEmail}>Iniciar otro correo</button>}
         {outbox.data.status === 'Resultado incierto' && <p>La conexión se interrumpió durante el envío. Revisa la carpeta Enviados y el buzón antes de decidir reenviar.</p>}
         {outbox.data.status === 'Error' && <p>No se confirmó el envío. El borrador y sus adjuntos permanecen guardados.</p>}

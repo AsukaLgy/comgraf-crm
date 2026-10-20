@@ -63,7 +63,12 @@ def main():
                                 break
                             healthy = run_cycle()
                             failures = 0 if healthy else failures + 1
-                            delay = max(15, settings.mail_sync_interval_seconds) if healthy else min(30 * (2 ** min(failures - 1, 5)), 900)
+                            # A repeated IMAP failure backs off, but the 15-minute
+                            # ceiling made recovery look permanently stopped. Cap
+                            # retries at five minutes while keeping pressure modest.
+                            delay = max(15, settings.mail_sync_interval_seconds) if healthy else min(30 * (2 ** min(failures - 1, 5)), 300)
+                            if not healthy:
+                                logger.warning('Yahoo mail worker reintentará en %s segundos; fallo_consecutivo=%s', delay, failures)
                             time.sleep(delay)
                     finally:
                         lock_connection.execute(text('SELECT RELEASE_LOCK(:name)'), {'name': LOCK_NAME})

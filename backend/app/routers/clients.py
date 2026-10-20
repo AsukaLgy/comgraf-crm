@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+import re
 from sqlalchemy import select
 from ..db import get_db
 from ..models import Client, Contact
@@ -7,6 +8,11 @@ from ..security import current_user, require
 from ..repository import client_search_text, normalize, row, cases_list, get_case, case_detail
 
 router = APIRouter(prefix='/api/clients', tags=['Clientes'])
+
+
+def validate_rtn(value: str):
+    if value and re.fullmatch(r'[0-9]{14}', value) is None:
+        raise HTTPException(422, 'El RTN debe contener exactamente 14 dígitos.')
 
 
 @router.get('')
@@ -20,6 +26,7 @@ def clients(q: str = '', user=Depends(current_user), db=Depends(get_db, scope='f
 @router.post('', status_code=201)
 def create_client(data: ClientInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'clients')
+    validate_rtn(data.rtn)
     client = Client(**data.model_dump())
     client.search_text = client_search_text(client)
     db.add(client)
@@ -50,6 +57,8 @@ def update(client_id: int, data: ClientUpdate, user=Depends(current_user), db=De
     client = db.scalar(select(Client).where(Client.id == client_id).with_for_update())
     if not client: raise HTTPException(404, 'Cliente no encontrado')
     if client.version != data.version: raise HTTPException(409, 'El cliente cambió; actualiza su perfil')
+    if data.rtn != client.rtn:
+        validate_rtn(data.rtn)
     for key, value in data.model_dump(exclude={'version'}).items(): setattr(client, key, value)
     client.version += 1
     client.search_text = client_search_text(client, db.scalars(select(Contact).where(Contact.client_id == client_id)))

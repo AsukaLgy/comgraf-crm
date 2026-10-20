@@ -44,7 +44,7 @@ export default function Settings({ user }) {
 
 function MailCompanyConfig({ user }) {
   const qc = useQueryClient()
-  const mail = useQuery({ queryKey: ['mail-config'], queryFn: () => api('/mail/config') })
+  const mail = useQuery({ queryKey: ['mail-config'], queryFn: () => api('/mail/config'), refetchInterval: 30000 })
   const [email, setEmail] = useState(null)
   const [password, setPassword] = useState('')
   const [error, setError] = useState(null)
@@ -131,16 +131,31 @@ function MailCompanyConfig({ user }) {
     <ErrorBox error={error}/>
     {tested && <div className="notice" role="status">
       <strong>{result.saved ? 'Configuración guardada.' : 'No se reemplazó la configuración actual.'}</strong>
-      <p>IMAP: {tested.imap.ok ? 'Conectado' : tested.imap.status === 'authentication_error' ? 'Error de autenticación' : 'Error de conexión'} · SMTP: {tested.smtp.ok ? 'Conectado' : tested.smtp.status === 'authentication_error' ? 'Error de autenticación' : 'Error de conexión'}</p>
+      <p>IMAP: {tested.imap.ok ? 'Conectado' : mailStatusLabel(tested.imap.status)} · SMTP: {tested.smtp.ok ? 'Conectado' : mailStatusLabel(tested.smtp.status)}</p>
+      {!tested.imap.ok && tested.imap.operation && <p>Operación IMAP: {tested.imap.operation}{tested.imap.cause_type ? ` · ${tested.imap.cause_type}` : ''}</p>}
     </div>}
     {result?.test && <div className="notice" role="status">{result.test.sent ? `Prueba aceptada por Yahoo. Copia en Enviados: ${result.test.sent_copy_status}.` : `Falló SMTP: ${result.test.smtp_label}.`}</div>}
     {state?.smtp_ready && !state?.configured && <div className="notice">SMTP está disponible para enviar. La recepción IMAP presenta un problema; revisa su estado antes de depender de la bandeja de entrada.</div>}
     {(state?.configured || state?.has_password || state?.last_sync_at) && <div className="profile-grid">
       <p>IMAP: <strong>{state.imap_label}</strong></p><p>SMTP: <strong>{state.smtp_label}</strong></p>
+      <p>Sincronizador: <strong>{state.worker_label || 'Estado desconocido'}</strong></p>
+      {state.last_error_label && <p>Último diagnóstico: <strong>{state.last_error_label}</strong></p>}
       <p>Última sincronización correcta: <strong>{state.last_sync_at ? new Date(state.last_sync_at).toLocaleString('es-HN', { timeZone: user.timezone }) : 'Aún no realizada'}</strong></p>
       <p>Se consulta INBOX aproximadamente cada minuto. Los correos anteriores al momento de conexión no se importan.</p>
     </div>}
+    {state?.worker_status === 'worker_stale' && <div className="notice warning" role="status">El buzón se puede autenticar, pero el sincronizador no registra una consulta correcta reciente. Revisa los registros del servicio Comgraf.</div>}
   </Panel>
+}
+
+function mailStatusLabel(code) {
+  return ({
+    authentication_error: 'Error de autenticación', connection_error: 'Error de conexión',
+    dns_error: 'Error de DNS', timeout_error: 'Tiempo de conexión agotado',
+    tls_error: 'Error de TLS/certificado', inbox_select_error: 'Error al abrir INBOX',
+    inbox_query_error: 'Error al consultar INBOX', inbox_metadata_error: 'Error en metadatos de INBOX',
+    message_fetch_error: 'Error al descargar mensaje', message_processing_error: 'Error al procesar mensaje',
+    persistence_error: 'Error al guardar correo',
+  })[code] || 'Error de conexión'
 }
 
 function PendingEmailClassification() {

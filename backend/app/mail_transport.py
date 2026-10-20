@@ -22,8 +22,10 @@ MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
 class MailFailure(Exception):
-    def __init__(self, code):
+    def __init__(self, code, *, operation=None, cause=None):
         self.code = code
+        self.operation = operation
+        self.cause_type = type(cause).__name__ if cause else None
         super().__init__(code)
 
 
@@ -38,30 +40,35 @@ def _uidvalidity(connection):
             return str(value[0].decode() if isinstance(value[0], bytes) else value[0])
     except Exception:
         pass
-    raise MailFailure('connection_error')
+    raise MailFailure('inbox_metadata_error', operation='uidvalidity')
 
 
 def _imap_checkpoint(email_address, password):
     connection = None
+    operation = 'connect'
     try:
         connection = open_imap()
+        operation = 'authentication'
         try:
             connection.login(email_address, password)
         except imaplib.IMAP4.error as exc:
-            raise MailFailure('authentication_error') from exc
+            raise MailFailure('authentication_error', operation=operation, cause=exc) from exc
+        operation = 'inbox_select'
         result, _ = connection.select('INBOX', readonly=True)
         if result != 'OK':
-            raise MailFailure('connection_error')
+            raise MailFailure('inbox_select_error', operation=operation)
+        operation = 'uidvalidity'
         validity = _uidvalidity(connection)
+        operation = 'inbox_checkpoint'
         result, data = connection.uid('search', None, 'ALL')
         if result != 'OK':
-            raise MailFailure('connection_error')
+            raise MailFailure('inbox_query_error', operation=operation)
         uids = [int(value) for value in (data[0] or b'').split() if value.isdigit()]
         return {'uidvalidity': validity, 'last_uid': max(uids, default=0)}
     except MailFailure:
         raise
-    except (imaplib.IMAP4.error, OSError, socket.timeout, TimeoutError) as exc:
-        raise MailFailure('connection_error') from exc
+    except (imaplib.IMAP4.error, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
+        raise _imap_failure(exc, operation) from exc
     finally:
         if connection is not None:
             try:
@@ -75,7 +82,8 @@ def check_imap(email_address, password):
         checkpoint = _imap_checkpoint(email_address, password)
         return {'ok': True, 'status': 'connected', 'checkpoint': checkpoint}
     except MailFailure as exc:
-        return {'ok': False, 'status': exc.code, 'checkpoint': None}
+        return {'ok': False, 'status': exc.code, 'operation': exc.operation,
+                'cause_type': exc.cause_type, 'checkpoint': None}
 
 
 def check_smtp(email_address, password):
@@ -85,14 +93,14 @@ def check_smtp(email_address, password):
         try:
             connection.login(email_address, password)
         except smtplib.SMTPAuthenticationError as exc:
-            raise MailFailure('authentication_error') from exc
+            raise MailFailure('authentication_error', operation=phase, cause=exc) from exc
         return {'ok': True, 'status': 'connected'}
     except MailFailure as exc:
         return {'ok': False, 'status': exc.code}
-    except (smtplib.SMTPException, OSError, socket.timeout, TimeoutError) as exc:
+    except (smtplib.SMTPException, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
         if isinstance(exc, smtplib.SMTPAuthenticationError):
             return {'ok': False, 'status': 'authentication_error'}
-        return {'ok': False, 'status': 'connection_error'}
+        return {'ok': False, 'status': _network_error_code(exc)}
     finally:
         if connection is not None:
             try:
@@ -111,10 +119,40 @@ def status_label(code):
         'connected': 'Conectado',
         'authentication_error': 'Error de autenticación',
         'connection_error': 'Error de conexión',
+        'dns_error': 'Error de DNS',
+        'timeout_error': 'Tiempo de conexión agotado',
+        'tls_error': 'Error de TLS/certificado',
+        'inbox_select_error': 'Error al abrir INBOX',
+        'inbox_query_error': 'Error al consultar INBOX',
+        'inbox_metadata_error': 'Error al leer metadatos de INBOX',
+        'message_fetch_error': 'Error al descargar mensaje',
+        'message_processing_error': 'Error al procesar mensaje',
+        'persistence_error': 'Error al guardar correo',
+        'worker_stale': 'Sin actividad reciente del sincronizador',
+        'starting': 'Esperando primera consulta',
         'not_checked': 'Sin comprobar',
         'disabled': 'Desconectado',
         'uncertain': 'Resultado incierto',
     }.get(code, 'Error de conexión' if code else 'Sin comprobar')
+
+
+def _network_error_code(exc):
+    if isinstance(exc, socket.gaierror):
+        return 'dns_error'
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return 'timeout_error'
+    if isinstance(exc, ssl.SSLError):
+        return 'tls_error'
+    return 'connection_error'
+
+
+def _imap_failure(exc, operation):
+    code = _network_error_code(exc) if isinstance(exc, (OSError, socket.timeout, TimeoutError, ssl.SSLError)) else {
+        'inbox_select': 'inbox_select_error',
+        'uidvalidity': 'inbox_metadata_error',
+        'inbox_checkpoint': 'inbox_query_error',
+    }.get(operation, 'connection_error')
+    return MailFailure(code, operation=operation, cause=exc)
 
 
 def send_test_mail(email_address, password):
@@ -158,13 +196,13 @@ def smtp_send(email_address, password, recipients, payload):
     except MailFailure:
         raise
     except smtplib.SMTPAuthenticationError as exc:
-        raise MailFailure('authentication_error') from exc
+        raise MailFailure('authentication_error', operation=phase, cause=exc) from exc
     except smtplib.SMTPDataError as exc:
-        raise MailFailure('smtp_rejected') from exc
+        raise MailFailure('smtp_rejected', operation=phase, cause=exc) from exc
     except (smtplib.SMTPException, OSError, socket.timeout, TimeoutError) as exc:
         if phase == 'data':
-            raise MailFailure('uncertain') from exc
-        raise MailFailure('connection_error') from exc
+            raise MailFailure('uncertain', operation=phase, cause=exc) from exc
+        raise MailFailure(_network_error_code(exc), operation=phase, cause=exc) from exc
     finally:
         if connection is not None:
             try:

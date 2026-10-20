@@ -6,8 +6,10 @@ import logging
 import os
 import re
 import socket
+import ssl
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.header import decode_header
 from email.message import EmailMessage as MIMEMessage
@@ -17,11 +19,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from sqlalchemy import func, or_, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .config import settings
 from .mail_security import decrypt_password
-from .mail_transport import ALLOWED_MIME, MAX_ATTACHMENT_BYTES, SENDER_NAME, MailFailure, _uidvalidity, append_sent_copy, open_imap, smtp_send, status_label
+from .mail_transport import ALLOWED_MIME, MAX_ATTACHMENT_BYTES, SENDER_NAME, MailFailure, _imap_failure, _uidvalidity, append_sent_copy, open_imap, smtp_send, status_label
 from .models import Case, Client, Contact, Event, MailAccount, MailAttachment, MailMessage, MailSyncCursor, User, now
 from .repository import client_search_text
 from .services import attach_incoming_mail, complete_resolved_production, create_incoming_email_case, event as add_event
@@ -40,7 +42,7 @@ def clean_address(value):
     return address if EMAIL_RE.fullmatch(address) else ''
 
 
-def account_projection(account):
+def account_projection(account, db=None):
     if not account:
         return {
             'configured': False,
@@ -54,9 +56,21 @@ def account_projection(account):
             'imap_label': status_label('not_checked'),
             'smtp_label': status_label('not_checked'),
             'last_sync_at': account.last_sync_at.isoformat() + 'Z' if account and account.last_sync_at else None,
+            'worker_status': 'not_configured',
+            'worker_label': 'Sin configurar',
         }
+    cursor = db.scalar(select(MailSyncCursor).where(MailSyncCursor.account_id == account.id, MailSyncCursor.folder == 'INBOX')) if db else None
+    last_success = cursor.last_synced_at if cursor and cursor.last_synced_at else account.last_sync_at
+    activity_base = last_success or (cursor.activated_at if cursor else account.created_at)
+    stale_after = max(180, settings.mail_sync_interval_seconds * 3)
+    worker_stale = bool(account.active and activity_base and now() - activity_base > timedelta(seconds=stale_after))
+    worker_status = 'disabled' if not account.active else 'worker_stale' if worker_stale else 'connected' if last_success else 'starting'
+    worker_label = status_label(worker_status)
     if not account.active:
-        status = account.status if account.status in {'authentication_error', 'connection_error', 'protocol_error'} else 'disconnected'
+        known_errors = {'authentication_error', 'connection_error', 'protocol_error', 'dns_error', 'timeout_error',
+                        'tls_error', 'inbox_select_error', 'inbox_query_error', 'inbox_metadata_error',
+                        'message_fetch_error', 'message_processing_error', 'persistence_error'}
+        status = account.status if account.status in known_errors else 'disconnected'
         return {
             'configured': False,
             'smtp_ready': False,
@@ -69,9 +83,16 @@ def account_projection(account):
             'imap_label': status_label(account.imap_status),
             'smtp_label': status_label(account.smtp_status),
             'last_sync_at': account.last_sync_at.isoformat() + 'Z' if account.last_sync_at else None,
+            'last_error': account.last_error,
+            'last_error_label': status_label(account.last_error) if account.last_error else None,
+            'worker_status': worker_status,
+            'worker_label': worker_label,
         }
-    protocol_errors = {account.imap_status, account.smtp_status} & {'authentication_error', 'connection_error', 'protocol_error'}
-    status = 'authentication_error' if 'authentication_error' in protocol_errors else 'connection_error' if 'connection_error' in protocol_errors else 'protocol_error' if protocol_errors else 'connected'
+    protocol_errors = {account.imap_status, account.smtp_status} - {'connected', 'not_checked', 'disabled'}
+    priority = ('authentication_error', 'dns_error', 'tls_error', 'timeout_error', 'inbox_select_error',
+                'inbox_query_error', 'inbox_metadata_error', 'message_fetch_error',
+                'message_processing_error', 'persistence_error', 'connection_error', 'protocol_error')
+    status = next((code for code in priority if code in protocol_errors), next(iter(protocol_errors), 'connected'))
     return {
         'configured': status == 'connected',
         'smtp_ready': account.smtp_status == 'connected',
@@ -83,7 +104,11 @@ def account_projection(account):
         'smtp_status': account.smtp_status,
         'imap_label': status_label(account.imap_status),
         'smtp_label': status_label(account.smtp_status),
-        'last_sync_at': account.last_sync_at.isoformat() + 'Z' if account.last_sync_at else None,
+        'last_sync_at': last_success.isoformat() + 'Z' if last_success else None,
+        'last_error': account.last_error,
+        'last_error_label': status_label(account.last_error) if account.last_error else None,
+        'worker_status': worker_status,
+        'worker_label': worker_label,
     }
 
 
@@ -527,6 +552,7 @@ def _outgoing_mime(db, row, account, password):
 
 def process_outbox_message(SessionLocal, message_id):
     """Send one committed queue row; only explicitly safe failures can be retried."""
+    processing_started = time.monotonic()
     with SessionLocal.begin() as db:
         row = db.scalar(select(MailMessage).where(MailMessage.id == message_id).with_for_update())
         if not row or row.direction != 'Saliente' or row.status != 'Pendiente':
@@ -565,49 +591,96 @@ def process_outbox_message(SessionLocal, message_id):
         recipients = row.to_addresses
         stored_message_id = row.message_id
         stored_payload = payload
+        queue_delay_ms = max(0, int((now() - row.created_at).total_seconds() * 1000))
 
     try:
         smtp_send(email_address, password, recipients, stored_payload)
-        send_status, error_code = 'Aceptado por Yahoo', None
-        sent_copy_status = append_sent_copy(email_address, password, stored_message_id, stored_payload)
     except MailFailure as exc:
+        logger.warning('Yahoo SMTP fallo code=%s operation=%s cause=%s message_id=%s',
+                       exc.code, exc.operation or 'send', exc.cause_type or 'none', message_id)
         if exc.code == 'uncertain':
             send_status, error_code, sent_copy_status = 'Resultado incierto', exc.code, None
         else:
             send_status, error_code, sent_copy_status = 'Error', exc.code, None
-
-    with SessionLocal.begin() as db:
-        row = db.scalar(select(MailMessage).where(MailMessage.id == message_id).with_for_update())
-        if not row or row.status != 'Enviando':
-            return
-        row.status, row.error_code, row.sent_copy_status = send_status, error_code, sent_copy_status
-        if send_status != 'Aceptado por Yahoo':
-            if error_code in {'authentication_error', 'connection_error'}:
+        with SessionLocal.begin() as db:
+            row = db.scalar(select(MailMessage).where(MailMessage.id == message_id).with_for_update())
+            if not row or row.status != 'Enviando':
+                return
+            row.status, row.error_code, row.sent_copy_status = send_status, error_code, sent_copy_status
+            if error_code in {'authentication_error', 'connection_error', 'dns_error', 'timeout_error', 'tls_error'}:
                 account = db.get(MailAccount, row.account_id)
                 if account and account.active:
                     account.status = error_code
                     account.last_error = error_code
                     account.smtp_status = error_code
+        return
+
+    # Persist Yahoo acceptance before opening a second IMAP connection for the
+    # optional Sent-folder copy. A slow copy must not make the send look pending.
+    accepted_at = now()
+    smtp_duration_ms = int((time.monotonic() - processing_started) * 1000)
+    with SessionLocal.begin() as db:
+        row = db.scalar(select(MailMessage).where(MailMessage.id == message_id).with_for_update())
+        if not row or row.status != 'Enviando':
             return
-        row.smtp_accepted_at = now()
+        row.status, row.error_code, row.sent_copy_status = 'Aceptado por Yahoo', None, 'Pendiente'
+        row.smtp_accepted_at = accepted_at
         case = db.get(Case, case_id)
         actor = db.get(User, actor_id) if actor_id else None
         if case:
-            # Compare server import time; the sender-controlled Date header is only display metadata.
             incoming_time = db.scalar(select(func.max(MailMessage.created_at)).where(
                 MailMessage.case_id == case.id, MailMessage.direction == 'Entrante', MailMessage.status == 'Vinculado'))
-            if incoming_time is None or incoming_time <= row.smtp_accepted_at:
+            if incoming_time is None or incoming_time <= accepted_at:
                 case.pending_message = False
             if case.first_response_at is None:
-                case.first_response_at = row.smtp_accepted_at
+                case.first_response_at = accepted_at
             add_event(db, case, actor, f"Correo enviado a {', '.join(row.to_addresses)}\nAsunto: {row.subject}\n\n{row.body_text}"[:25000],
                 kind='Correo saliente', channel='Correo', data={
                     'direction': 'Saliente', 'email_message_id': row.id, 'message_id': row.message_id,
                     'thread_root': row.thread_root, 'smtp_status': 'Aceptado por Yahoo',
-                    'sent_copy_status': row.sent_copy_status,
+                    'sent_copy_status': 'Pendiente',
                 })
             case.version += 1
             complete_resolved_production(db, case, actor, 'email_sent')
+    logger.info('Yahoo SMTP aceptó correo message_id=%s queue_delay_ms=%s smtp_duration_ms=%s',
+                message_id, queue_delay_ms, smtp_duration_ms)
+
+    copy_started = time.monotonic()
+    try:
+        copy_status = append_sent_copy(email_address, password, stored_message_id, stored_payload)
+    except Exception as exc:
+        logger.warning('Copia de correo aceptado no pudo guardarse message_id=%s cause=%s', message_id, type(exc).__name__)
+        copy_status = 'Error'
+    copy_duration_ms = int((time.monotonic() - copy_started) * 1000)
+    with SessionLocal.begin() as db:
+        row = db.scalar(select(MailMessage).where(MailMessage.id == message_id).with_for_update())
+        if row and row.status == 'Aceptado por Yahoo':
+            row.sent_copy_status = copy_status
+    logger.info('Copia Yahoo Enviados message_id=%s status=%s duration_ms=%s',
+                message_id, copy_status, copy_duration_ms)
+
+
+def retry_sent_copy(SessionLocal, message_id):
+    """Retry only the Yahoo Sent-folder copy; this path never invokes SMTP."""
+    with SessionLocal.begin() as db:
+        row = db.scalar(select(MailMessage).where(MailMessage.id == message_id).with_for_update())
+        if not row or row.direction != 'Saliente' or row.status != 'Aceptado por Yahoo':
+            raise MailFailure('copy_not_retryable')
+        if row.sent_copy_status != 'Error':
+            raise MailFailure('copy_not_retryable')
+        account = db.get(MailAccount, row.account_id)
+        if not account or not account.active or not account.encrypted_password:
+            raise MailFailure('account_disconnected')
+        password = decrypt_password(account.encrypted_password)
+        payload = _outgoing_mime(db, row, account, password)
+        email_address = account.email
+        try:
+            result = append_sent_copy(email_address, password, row.message_id, payload)
+        except Exception as exc:
+            logger.warning('Reintento de copia Yahoo fallido message_id=%s cause=%s', message_id, type(exc).__name__)
+            result = 'Error'
+        row.sent_copy_status = result
+        return result
 
 
 def recover_stuck_outbox(SessionLocal):
@@ -621,6 +694,14 @@ def recover_stuck_outbox(SessionLocal):
         for row in rows:
             row.status = 'Resultado incierto'
             row.error_code = 'worker_interrupted'
+        pending_copies = db.scalars(select(MailMessage).where(
+            MailMessage.direction == 'Saliente', MailMessage.status == 'Aceptado por Yahoo',
+            MailMessage.sent_copy_status == 'Pendiente', MailMessage.created_at < threshold,
+        ).with_for_update()).all()
+        # The SMTP acceptance is already durable; a worker interruption only
+        # makes the optional Sent-folder copy retryable, never the email itself.
+        for row in pending_copies:
+            row.sent_copy_status = 'Error'
 
 
 def sync_account(SessionLocal, account_id):
@@ -639,15 +720,20 @@ def sync_account(SessionLocal, account_id):
                 account.last_error = 'key_unavailable'
         return False
     connection = None
+    operation = 'connect'
+    imported_count = 0
     try:
         connection = open_imap()
+        operation = 'authentication'
         try:
             connection.login(email_address, password)
         except imaplib.IMAP4.error as exc:
-            raise MailFailure('authentication_error') from exc
+            raise MailFailure('authentication_error', operation=operation, cause=exc) from exc
+        operation = 'inbox_select'
         result, _ = connection.select('INBOX', readonly=True)
         if result != 'OK':
-            raise MailFailure('connection_error')
+            raise MailFailure('inbox_select_error', operation=operation)
+        operation = 'uidvalidity'
         validity = _uidvalidity(connection)
         with SessionLocal.begin() as db:
             account = db.scalar(select(MailAccount).where(MailAccount.id == account_id).with_for_update())
@@ -666,18 +752,26 @@ def sync_account(SessionLocal, account_id):
             cursor = db.scalar(select(MailSyncCursor).where(MailSyncCursor.account_id == account_id, MailSyncCursor.folder == 'INBOX'))
             start_uid = int(cursor.last_uid if cursor and cursor.uidvalidity == validity else 0) + 1
             activation_floor = cursor.activated_at.replace(microsecond=0) if cursor and cursor.activated_at else None
+        operation = 'inbox_query'
         result, search_data = connection.uid('search', None, 'UID', f'{start_uid}:*')
         if result != 'OK':
-            raise MailFailure('connection_error')
+            raise MailFailure('inbox_query_error', operation=operation)
         uids = [int(value) for value in (search_data[0] or b'').split() if value.isdigit() and int(value) >= start_uid][:50]
         for uid in uids:
+            operation = 'message_metadata'
             result, size_rows = connection.uid('fetch', str(uid), '(RFC822.SIZE INTERNALDATE)')
             if result != 'OK':
-                raise MailFailure('connection_error')
-            size_metadata = next((part[0] for part in size_rows if isinstance(part, tuple) and isinstance(part[0], bytes)), b'')
+                raise MailFailure('message_fetch_error', operation=operation)
+            # RFC-compliant servers may return the FETCH metadata as a bytes row,
+            # while Yahoo currently returns it that way for metadata-only FETCH.
+            size_metadata = next((
+                part[0] if isinstance(part, tuple) and isinstance(part[0], bytes) else part
+                for part in size_rows or []
+                if (isinstance(part, bytes) or (isinstance(part, tuple) and isinstance(part[0], bytes)))
+            ), b'')
             size_match = re.search(rb'\bRFC822\.SIZE\s+(\d+)', size_metadata, re.IGNORECASE)
             if not size_match:
-                raise MailFailure('connection_error')
+                raise MailFailure('message_fetch_error', operation='message_metadata')
             message_size = int(size_match.group(1))
             internal_date = _imap_internal_date(size_metadata)
             after_activation = bool(
@@ -691,17 +785,20 @@ def sync_account(SessionLocal, account_id):
                 # history when resuming from a reset UIDVALIDITY generation.
                 raw = None
             elif oversized:
+                operation = 'message_header_fetch'
                 result, fetched = connection.uid('fetch', str(uid), '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM TO SUBJECT DATE REFERENCES IN-REPLY-TO)])')
                 if result != 'OK':
-                    raise MailFailure('connection_error')
+                    raise MailFailure('message_fetch_error', operation=operation)
                 raw = next((part[1] for part in fetched if isinstance(part, tuple) and isinstance(part[1], bytes)), None)
             else:
+                operation = 'message_body_fetch'
                 result, fetched = connection.uid('fetch', str(uid), '(BODY.PEEK[])')
                 if result != 'OK':
-                    raise MailFailure('connection_error')
+                    raise MailFailure('message_fetch_error', operation=operation)
                 raw = next((part[1] for part in fetched if isinstance(part, tuple) and isinstance(part[1], bytes)), None)
             newly_written = []
             try:
+                operation = 'message_persistence'
                 with SessionLocal.begin() as db:
                     account = db.scalar(select(MailAccount).where(MailAccount.id == account_id).with_for_update())
                     if not account or not account.active:
@@ -711,6 +808,7 @@ def sync_account(SessionLocal, account_id):
                         _store_oversized_message(db, account, 'INBOX', validity, uid, raw)
                     elif raw and not oversized and after_activation:
                         _, newly_written = _store_incoming(db, account, 'INBOX', validity, uid, raw)
+                        imported_count += 1
                     cursor.uidvalidity, cursor.last_uid = validity, uid
                     cursor.last_synced_at = now()
                     account.last_sync_at = cursor.last_synced_at
@@ -725,6 +823,7 @@ def sync_account(SessionLocal, account_id):
                         pass
                 raise
         with SessionLocal.begin() as db:
+            operation = 'sync_persistence'
             account = db.scalar(select(MailAccount).where(MailAccount.id == account_id, MailAccount.active.is_(True)))
             if account:
                 cursor = db.scalar(select(MailSyncCursor).where(MailSyncCursor.account_id == account_id, MailSyncCursor.folder == 'INBOX'))
@@ -732,6 +831,7 @@ def sync_account(SessionLocal, account_id):
                     cursor.last_synced_at = now()
                     account.last_sync_at = cursor.last_synced_at
                 account.status, account.imap_status, account.last_error = 'connected', 'connected', None
+        logger.info('Yahoo IMAP sincronización correcta account_id=%s imported=%s', account_id, imported_count)
         return True
     except MailFailure as exc:
         with SessionLocal.begin() as db:
@@ -740,18 +840,40 @@ def sync_account(SessionLocal, account_id):
                 account.status = exc.code
                 account.last_error = exc.code
                 account.imap_status = exc.code
-        logger.warning('Yahoo IMAP sincronización fallida: %s', exc.code)
+        logger.warning('Yahoo IMAP sincronización fallida code=%s operation=%s cause=%s',
+                       exc.code, exc.operation or operation, exc.cause_type or 'none')
         return False
-    except (imaplib.IMAP4.error, OSError, socket.timeout, TimeoutError) as exc:
-        code = 'connection_error'
+    except (imaplib.IMAP4.error, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
+        failure = _imap_failure(exc, operation)
+        code = failure.code
         with SessionLocal.begin() as db:
             account = db.get(MailAccount, account_id)
             if account and account.active:
                 account.status, account.last_error, account.imap_status = code, code, code
-        logger.warning('Yahoo IMAP sincronización fallida: %s', code)
+        logger.warning('Yahoo IMAP sincronización fallida code=%s operation=%s cause=%s',
+                       code, operation, type(exc).__name__)
         return False
-    except Exception:
-        logger.exception('Error interno al procesar correo Yahoo; la siguiente ejecución continuará desde el último UID confirmado.')
+    except SQLAlchemyError as exc:
+        with SessionLocal.begin() as db:
+            account = db.get(MailAccount, account_id)
+            if account and account.active:
+                account.last_error = 'persistence_error'
+                account.imap_status = 'persistence_error'
+                account.status = 'persistence_error'
+        logger.error('Yahoo IMAP persistencia fallida code=persistence_error operation=%s cause=%s',
+                     operation, type(exc).__name__)
+        return False
+    except Exception as exc:
+        code = 'message_processing_error' if operation.startswith('message_') else 'connection_error'
+        if operation.startswith('message_'):
+            with SessionLocal.begin() as db:
+                account = db.get(MailAccount, account_id)
+                if account and account.active:
+                    account.last_error = code
+                    account.imap_status = code
+                    account.status = code
+        logger.error('Yahoo IMAP sincronización fallida code=%s operation=%s cause=%s',
+                     code, operation, type(exc).__name__)
         return False
     finally:
         if connection is not None:

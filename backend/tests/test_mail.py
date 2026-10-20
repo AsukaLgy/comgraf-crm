@@ -172,7 +172,14 @@ def test_outbox_acceptance_and_uncertain_result_are_not_retried_automatically(cl
     accepted = api.post(f"/api/cases/{case['id']}/email/send", json=payload).json()
     calls = []
     monkeypatch.setattr(mail_service, 'smtp_send', lambda *args: calls.append(args) or True)
-    monkeypatch.setattr(mail_service, 'append_sent_copy', lambda *_: 'Guardada')
+    def append_after_acceptance(*_):
+        with SessionLocal() as db:
+            stored = db.get(MailMessage, accepted['id'])
+            assert stored.status == 'Aceptado por Yahoo'
+            assert stored.smtp_accepted_at is not None
+            assert stored.sent_copy_status == 'Pendiente'
+        return 'Guardada'
+    monkeypatch.setattr(mail_service, 'append_sent_copy', append_after_acceptance)
     process_outbox_message(SessionLocal, accepted['id'])
     with SessionLocal() as db:
         stored = db.get(MailMessage, accepted['id'])
@@ -181,6 +188,17 @@ def test_outbox_acceptance_and_uncertain_result_are_not_retried_automatically(cl
         assert db.query(Event).filter(Event.case_id == case['id'], Event.kind == 'Correo saliente').count() == 1
         assert stored.thread_root == stored.message_id
     assert len(calls) == 1
+
+    with SessionLocal.begin() as db:
+        stored = db.get(MailMessage, accepted['id'])
+        stored.sent_copy_status = 'Error'
+    copy_calls = []
+    monkeypatch.setattr(mail_service, 'append_sent_copy', lambda *_: copy_calls.append(True) or 'Guardada')
+    copy_retry = api.post(f"/api/mail/outbox/{accepted['id']}/retry-copy", json={})
+    assert copy_retry.status_code == 200 and copy_retry.json()['sent_copy_status'] == 'Guardada'
+    assert len(copy_calls) == 1 and len(calls) == 1
+    with SessionLocal() as db:
+        assert db.get(MailMessage, accepted['id']).sent_copy_status == 'Guardada'
 
     payload['send_key'] = 'email-send-key-uncertain-01'
     uncertain = api.post(f"/api/cases/{case['id']}/email/send", json=payload).json()
@@ -245,8 +263,9 @@ def test_sync_uses_uid_checkpoint_deduplicates_and_reopens_valid_thread(clients,
                 internaldate = date_value.strftime('%d-%b-%Y %H:%M:%S %z') if date_value else None
                 if 'RFC822.SIZE' in args[1]:
                     date_field = f' INTERNALDATE "{internaldate}"' if internaldate else ''
-                    metadata = f'1 (RFC822.SIZE {self.sizes.get(uid, len(value))}{date_field})'.encode()
-                    return 'OK', [(metadata, b'')]
+                    # Yahoo sends metadata-only FETCH as a bytes row, not a tuple.
+                    metadata = f'10000 (UID {uid} RFC822.SIZE {self.sizes.get(uid, len(value))}{date_field})'.encode()
+                    return 'OK', [metadata]
                 if 'HEADER.FIELDS' in args[1]:
                     headers = value.split(b'\r\n\r\n', 1)[0] + b'\r\n\r\n'
                     return 'OK', [(b'1 (BODY[HEADER.FIELDS] {128})', headers), b')']

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import uuid
+from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
@@ -9,6 +10,7 @@ from .models import Case, Client, Contact, Delivery, Event, Idempotency, Item, L
 from .security import can, require, require_binding_scanner
 from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance, attention_predicates, case_completion_blockers
 from . import schemas as s
+from .cai import CAI_BINDINGS, cai_summary
 
 NEXT_STAGE = s.NEXT_STAGE
 PREVIOUS_STAGES = s.PREVIOUS_STAGES
@@ -398,7 +400,54 @@ def convert(db, user, case_id, data):
         if db.scalar(select(Production.id).where(Production.quote_id == quote.id)):
             fail('Esta cotización ya está vinculada a una orden. Usa “Agregar orden” y especifica los productos del nuevo trabajo.', 409)
         if quote.currency != CURRENCY_HNL: fail('Esta cotización histórica está en USD. Revísala y crea una nueva versión en HNL antes de generar producción.', 409)
-        items = quote.items
+        quoted_items = quote.items or []
+        needs_binding = any(
+            item.get('product') == 'Talonarios de factura CAI'
+            and not (item.get('specs') or {}).get('cai_binding')
+            for item in quoted_items
+        )
+        if needs_binding:
+            if len(data.items) != len(quoted_items):
+                fail('Selecciona el tipo de encuadernación para cada partida CAI antes de generar la orden')
+
+            def clean(value):
+                if isinstance(value, dict):
+                    return {key: clean(part) for key, part in value.items() if part not in (None, '')}
+                if isinstance(value, list):
+                    return [clean(part) for part in value]
+                return value
+
+            resolved_items = deepcopy(quoted_items)
+            for index, (original, submitted) in enumerate(zip(quoted_items, data.items)):
+                chosen = submitted.model_dump(mode='json')
+                if (
+                    original.get('product') != chosen.get('product')
+                    or Decimal(str(original.get('quantity'))) != submitted.quantity
+                    or original.get('unit') != submitted.unit
+                    or Decimal(str(original.get('unit_price'))) != submitted.unit_price
+                ):
+                    fail('Al completar una cotización histórica solo puedes indicar la encuadernación pendiente')
+
+                source_specs = dict(original.get('specs') or {})
+                chosen_specs = dict(chosen.get('specs') or {})
+                source_binding = source_specs.pop('cai_binding', None)
+                chosen_binding = chosen_specs.pop('cai_binding', None)
+                if clean(source_specs) != clean(chosen_specs):
+                    fail('Al completar una cotización histórica solo puedes indicar la encuadernación pendiente')
+                if original.get('product') == 'Talonarios de factura CAI':
+                    if source_binding:
+                        if source_binding != chosen_binding:
+                            fail('La encuadernación cotizada no puede cambiar al generar la orden')
+                    elif chosen_binding not in CAI_BINDINGS:
+                        fail('Selecciona un tipo de encuadernación válido para cada partida CAI')
+                    else:
+                        resolved_items[index]['specs'] = {
+                            **(resolved_items[index].get('specs') or {}),
+                            'cai_binding': chosen_binding,
+                        }
+            items = resolved_items
+        else:
+            items = quoted_items
     else:
         quote = None
     if not items: fail('Agrega al menos un producto')
@@ -433,7 +482,6 @@ def convert(db, user, case_id, data):
     order_items = [Item(case_id=case.id, production_id=production.id, **item) for item in items]
     db.add_all(order_items)
     db.flush()
-    from .cai import cai_summary
     production.specs_snapshot = {'items': [{**row(item, ('substage',)), **({'cai_summary': cai_summary({'product': item.product, 'quantity': item.quantity, 'specs': item.specs})} if item.product == 'Talonarios de factura CAI' else {})} for item in order_items]}
     db.add(Ledger(case_id=case.id, production_id=production.id, kind='Obligación', amount=price, currency=CURRENCY_HNL,
         due_date=data.payment_due_date, reference='Orden de producción', actor_id=user.id))

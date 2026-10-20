@@ -10,6 +10,7 @@ CAI_FORMATS = {
 CAI_GAMES = {25, 50}
 CAI_PAPERS = {'Bond', 'Químico'}
 CAI_COPIES = {1, 2, 3}
+CAI_BINDINGS = {'Engrapado', 'Pegado', 'Hojas sueltas'}
 CAI_PRODUCT = 'Talonarios de factura CAI'
 
 

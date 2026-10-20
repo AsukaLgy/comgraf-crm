@@ -21,7 +21,7 @@ def must(response, status=200):
 
 
 def create(client, subject='Consulta presencial'):
-    customer = must(client.post('/api/clients', json={'name':'María Álvarez', 'company':'Gráfica Norte', 'rtn':'0801-1990-00123', 'phones':['+504 9999-1234'], 'emails':['maria@example.test']}), 201)
+    customer = must(client.post('/api/clients', json={'name':'María Álvarez', 'company':'Gráfica Norte', 'rtn':'08011990001234', 'phones':['+504 9999-1234'], 'emails':['maria@example.test']}), 201)
     case = must(client.post('/api/cases', json={'client_id':customer['id'], 'subject':subject}), 201)
     return customer, case
 

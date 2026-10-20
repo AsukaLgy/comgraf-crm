@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, field_validator, model_validator
 
 Money = Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)]
 Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
@@ -76,7 +76,8 @@ class ContactInput(Input):
 class ClientInput(Input):
     name: str = Field(min_length=1, max_length=180)
     company: str = Field(default='', max_length=180)
-    rtn: str = Field(default='', max_length=30)
+    # Keep raw whitespace so the API can reject it instead of silently trimming it.
+    rtn: Annotated[str, StringConstraints(strip_whitespace=False, max_length=30)] = ''
     phones: list[Annotated[str, Field(max_length=60)]] = Field(default_factory=list, max_length=20)
     emails: list[Annotated[str, Field(max_length=180)]] = Field(default_factory=list, max_length=20)
     addresses: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=20)
@@ -182,6 +183,7 @@ class Specs(Input):
     games_per_pad: Literal[25, 50] | None = None
     paper_type: Literal['Bond', 'Químico'] | None = None
     additional_copies: Literal[1, 2, 3] | None = None
+    cai_binding: Literal['Engrapado', 'Pegado', 'Hojas sueltas'] | None = None
 
 
 # ---- Cotización y conversión a una orden activa ----
@@ -194,7 +196,7 @@ class ItemInput(Input):
 
     @model_validator(mode='after')
     def cai_contract(self):
-        cai_fields = ('cai_format', 'games_per_pad', 'paper_type', 'additional_copies')
+        cai_fields = ('cai_format', 'games_per_pad', 'paper_type', 'additional_copies', 'cai_binding')
         if self.product == 'Talonarios de factura CAI':
             if self.unit != 'talonarios':
                 raise ValueError('La unidad comercial de Talonarios de factura CAI debe ser talonarios')
