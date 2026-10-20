@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { Printer } from 'lucide-react'
 import { date } from './api'
 import { Specifications } from './ProductForm'
+import OrderQRCode from './OrderQRCode'
 
 export default function CasePrintSheet({ id, record, person }) {
   const production = record.production
@@ -12,7 +13,7 @@ export default function CasePrintSheet({ id, record, person }) {
           <Printer size={16} />
           Imprimir / Guardar PDF
         </button>
-        <Link to={`/cases/${id}`}>Volver a la solicitud</Link>
+        <Link to={`/cases/${id}${production?.id ? `?production_id=${production.id}` : ''}`}>Volver a la solicitud</Link>
       </div>
       <header>
         <div>
@@ -58,6 +59,7 @@ export default function CasePrintSheet({ id, record, person }) {
             </p>
           ))}
           <p>Modalidad de entrega: {production.delivery_method}</p>
+          <OrderQRCode production={production} caseNumber={record.number} description={production.instructions || record.subject} client={record.client.name} />
         </>
       )}
     </article>

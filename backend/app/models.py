@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import uuid
 from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Date, Numeric, JSON, ForeignKey, UniqueConstraint, Index
 from .db import Base
 
@@ -141,6 +142,11 @@ class Production(Base):
     id = Column(Integer, primary_key=True)
     case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
     created_by_id = Column(ForeignKey('users.id'))
+    scan_id = Column(String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    workflow_cycle = Column(Integer, nullable=False, default=0, server_default='0')
+    binding_confirmed_cycle = Column(Integer)
+    binding_confirmed_at = Column(DateTime)
+    binding_confirmed_by_id = Column(ForeignKey('users.id'))
     quote_id = Column(ForeignKey('quotes.id'), unique=True)
     # Legacy assignment column; current ownership is the case's principal owner.
     owner_id = Column(ForeignKey('users.id'))
@@ -266,6 +272,22 @@ class SavedView(Base):
     user_id = Column(ForeignKey('users.id'), nullable=False)
     name = Column(String(100), nullable=False)
     filters = Column(JSON, nullable=False)
+
+
+class PartialReleaseRequest(Base):
+    __tablename__ = 'partial_release_requests'
+    id = Column(Integer, primary_key=True)
+    case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
+    production_id = Column(ForeignKey('productions.id'), nullable=False, index=True)
+    production_cycle = Column(Integer, nullable=False)
+    requester_id = Column(ForeignKey('users.id'), nullable=False)
+    request_comment = Column(Text, nullable=False)
+    request_key = Column(String(80), nullable=False, unique=True)
+    status = Column(String(20), nullable=False, default='Pendiente')
+    approver_id = Column(ForeignKey('users.id'))
+    decision_comment = Column(Text)
+    decided_at = Column(DateTime)
+    created_at = Column(DateTime, nullable=False, default=now)
 
 
 class ProviderInbox(Base):

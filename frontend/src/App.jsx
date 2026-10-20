@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { NavLink, Routes, Route, useNavigate, useParams, Navigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -16,6 +16,7 @@ import {
   Search,
   LogOut,
   Layers,
+  ClipboardCheck,
 } from 'lucide-react'
 import { api, can, setTimezone, API_CONTRACT_VERSION, PRODUCT_VERSION } from './api'
 import { ErrorBox, Loading, Field } from './components'
@@ -24,6 +25,9 @@ import CasePage from './CasePage'
 import Clients from './Clients'
 import { Calendar, Indicators } from './Reports'
 import Settings from './Settings'
+import PartialReleaseApprovals from './PartialReleaseApprovals'
+
+const BindingScanner = lazy(() => import('./BindingScanner'))
 
 function Login() {
   const qc = useQueryClient(),
@@ -144,6 +148,7 @@ export default function App() {
     ['/calendar', 'Calendario', CalendarDays],
     ['/inbox/finalized', 'Completados', CheckCheck],
     ['/inbox/history', 'Historial', History],
+    ...(can(user, 'partial_release_approve') ? [['/binding-releases', 'Liberaciones parciales', ClipboardCheck]] : []),
     ...(can(user, 'reports') ? [['/indicators', 'Indicadores', ChartNoAxesCombined]] : []),
     ['/settings', 'Configuración', SettingsIcon],
   ]
@@ -155,6 +160,9 @@ export default function App() {
     } catch (e) {
       setLogoutError(e)
     }
+  }
+  if (user.roles.length === 1 && user.roles[0] === 'Escáner de encuadernación') {
+    return <Suspense fallback={<Loading />}><BindingScanner user={user} onLogout={logout} /></Suspense>
   }
   return (
     <div className="app-shell">
@@ -250,6 +258,7 @@ export default function App() {
               }
             />
             <Route path="/calendar" element={<Calendar />} />
+            <Route path="/binding-releases" element={<Guard user={user} permission="partial_release_approve"><PartialReleaseApprovals/></Guard>} />
             <Route
               path="/indicators"
               element={

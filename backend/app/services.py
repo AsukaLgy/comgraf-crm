@@ -5,8 +5,8 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
 from sqlalchemy import select, func
-from .models import Case, Delivery, Event, Idempotency, Item, Ledger, Production, Quote, Task, User, now
-from .security import can, require
+from .models import Case, Client, Delivery, Event, Idempotency, Item, Ledger, PartialReleaseRequest, Production, Quote, Task, User, now
+from .security import can, require, require_binding_scanner
 from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance, attention_predicates, case_completion_blockers
 from . import schemas as s
 
@@ -403,11 +403,268 @@ def get_production(db, case, production_id=None, *, allow_cancelled=False):
     return production
 
 
+# ---- Confirmación física de encuadernación y liberación de órdenes ----
+def _scanner_context(db, user, qr_text, *, lock=False):
+    require_binding_scanner(db, user)
+    scan_id = qr_text[6:]
+    ref = db.scalar(select(Production).where(Production.scan_id == scan_id))
+    if not ref:
+        fail('El QR no corresponde a una orden de Comgraf', 404)
+    case_query = select(Case).where(Case.id == ref.case_id)
+    if lock:
+        case_query = case_query.with_for_update()
+    case = db.scalar(case_query.execution_options(populate_existing=lock))
+    orders_query = select(Production).where(Production.case_id == case.id).order_by(Production.id)
+    if lock:
+        orders_query = orders_query.with_for_update()
+    orders = db.scalars(orders_query.execution_options(populate_existing=lock)).all()
+    production = next((order for order in orders if order.scan_id == scan_id), None)
+    if not production:
+        fail('La orden cambió mientras se leía el QR. Escanéala otra vez.', 409)
+    return case, orders, production
+
+
+def _scan_confirmed(production):
+    return production.binding_confirmed_at is not None and production.binding_confirmed_cycle == production.workflow_cycle
+
+
+def _release_group_pending(db, case, orders):
+    result = []
+    for order in orders:
+        if order.cancelled_at or order.stage == 'READY' or delivery_status(db, case.id, order.id) == 'Completa':
+            continue
+        if order.blocked_since:
+            reason = 'Bloqueada'
+        elif order.classification_required or not order.stage:
+            reason = 'Etapa histórica pendiente de clasificación'
+        elif order.stage != 'WORKSHOP':
+            reason = f'Etapa actual: {s.STAGE_LABELS.get(order.stage, order.stage)}'
+        elif not _scan_confirmed(order):
+            reason = 'Pendiente de escaneo'
+        else:
+            continue
+        result.append({'production_id': order.id, 'order_number': f'OP-{order.id:05d}', 'stage': order.stage,
+            'stage_label': s.STAGE_LABELS.get(order.stage, 'Pendiente de clasificación'), 'reason': reason})
+    return result
+
+
+def _scanner_order_summary(db, case, production):
+    client = db.get(Client, case.client_id)
+    items = db.scalars(select(Item).where(Item.production_id == production.id).order_by(Item.id)).all()
+    return {'id': production.id, 'order_number': f'OP-{production.id:05d}',
+        'case_number': f'CG-{case.id:06d}', 'subject': case.subject, 'client': client.name if client else '',
+        'stage': production.stage, 'stage_label': s.STAGE_LABELS.get(production.stage, 'Pendiente de clasificación'),
+        'blocked': bool(production.blocked_since), 'cancelled': bool(production.cancelled_at),
+        'delivery_complete': delivery_status(db, case.id, production.id) == 'Completa',
+        'confirmed': _scan_confirmed(production), 'confirmed_at': production.binding_confirmed_at,
+        'items': [{'product': item.product, 'quantity': str(item.quantity), 'unit': item.unit} for item in items]}
+
+
+def _scanner_group_status(db, case, production, orders):
+    missing = _release_group_pending(db, case, orders)
+    return {'order': _scanner_order_summary(db, case, production), 'pending_orders': missing,
+        'can_confirm': case.lifecycle == 'Activo' and production.stage == 'WORKSHOP' and not production.blocked_since
+            and not production.cancelled_at and delivery_status(db, case.id, production.id) != 'Completa'
+            and not _scan_confirmed(production)}
+
+
+def scan_lookup(db, user, qr_text):
+    case, orders, production = _scanner_context(db, user, qr_text)
+    return _scanner_group_status(db, case, production, orders) | {
+        'lifecycle': case.lifecycle,
+        'reason': ('La solicitud está completada.' if case.lifecycle != 'Activo' else
+            'La orden está anulada.' if production.cancelled_at else
+            'La orden ya fue entregada por completo.' if delivery_status(db, case.id, production.id) == 'Completa' else
+            'Resuelve el bloqueo antes de confirmar.' if production.blocked_since else
+            f'La orden está en {s.STAGE_LABELS.get(production.stage, "una etapa pendiente de clasificación")}; escanea solo al terminar Encuadernación.' if production.stage != 'WORKSHOP' else
+            'Esta orden ya fue confirmada para el ciclo actual.' if _scan_confirmed(production) else None)}
+
+
+def scan_binding(db, user, qr_text):
+    case, orders, production = _scanner_context(db, user, qr_text, lock=True)
+    # A retry can arrive after the first response was lost and the group was
+    # already moved to READY. Treat it as an idempotent read of the outcome.
+    if _scan_confirmed(production):
+        return _scanner_group_status(db, case, production, orders) | {'result': 'already_confirmed',
+            'message': 'Esta orden ya fue confirmada para el ciclo actual.'}
+    if case.lifecycle != 'Activo':
+        fail('La solicitud está completada; no se puede confirmar escaneo.', 409)
+    if production.cancelled_at:
+        fail('La orden está anulada; no se puede confirmar escaneo.', 409)
+    if delivery_status(db, case.id, production.id) == 'Completa':
+        fail('La orden ya está completamente entregada.', 409)
+    if production.blocked_since:
+        fail('Resuelve el bloqueo antes de confirmar la encuadernación.', 409)
+    if production.classification_required or production.stage is None:
+        fail('La etapa histórica debe clasificarse en el CRM antes de confirmar.', 409)
+    if production.stage != 'WORKSHOP':
+        fail(f"La orden está en {s.STAGE_LABELS.get(production.stage, production.stage)}. No puede saltar etapas desde esta terminal.", 409)
+    confirmed_at = now()
+    case.version += 1
+    production.binding_confirmed_cycle = production.workflow_cycle
+    production.binding_confirmed_at = confirmed_at
+    production.binding_confirmed_by_id = user.id
+    event(db, case, user, f"Encuadernación confirmada por escáner en OP-{production.id:05d}.", data={
+        'action': 'binding_scan_confirmed', 'production_id': production.id, 'order_number': f'OP-{production.id:05d}',
+        'production_cycle': production.workflow_cycle, 'origin': 'scanner', 'confirmed_at': confirmed_at.isoformat() + 'Z'})
+
+    missing = _release_group_pending(db, case, orders)
+    pending_group = [order for order in orders if not order.cancelled_at and order.stage != 'READY'
+        and delivery_status(db, case.id, order.id) != 'Completa']
+    if pending_group and not missing:
+        released_at = now()
+        for order in pending_group:
+            previous = order.stage
+            order.stage = 'READY'
+            order.stage_started_at = released_at
+            event(db, case, user, f"OP-{order.id:05d}: Encuadernación → Listo para entregar por liberación de grupo tras escaneo.",
+                data={'action': 'stage', 'production_id': order.id, 'order_number': f'OP-{order.id:05d}',
+                    'from': previous, 'to': 'READY', 'origin': 'binding_scan_group', 'seconds': 0})
+            schedule_pickup_followup(db, case, user, order.id)
+        ids = [order.id for order in pending_group]
+        stale_requests = db.scalars(select(PartialReleaseRequest).where(PartialReleaseRequest.production_id.in_(ids),
+            PartialReleaseRequest.status == 'Pendiente').with_for_update()).all()
+        for request in stale_requests:
+            request.status = 'Invalidada'
+            request.decided_at = released_at
+            event(db, case, user, f"Se invalidó la excepción pendiente de OP-{request.production_id:05d} porque el grupo se liberó normalmente.", data={
+                'action': 'partial_release_invalidated', 'request_id': request.id,
+                'production_id': request.production_id, 'origin': 'binding_scan_group'})
+        event(db, case, user, 'Grupo de órdenes habilitado para entrega tras confirmar la encuadernación.',
+            data={'action': 'binding_group_released', 'production_ids': ids, 'origin': 'scanner', 'released_at': released_at.isoformat() + 'Z'})
+        return _scanner_group_status(db, case, production, orders) | {'result': 'released', 'released_orders': [f'OP-{pid:05d}' for pid in ids],
+            'message': 'Encuadernación confirmada. Las órdenes del grupo están listas para entregar.'}
+
+    return _scanner_group_status(db, case, production, orders) | {'result': 'confirmed_waiting', 'released_orders': [],
+        'message': 'Encuadernación confirmada; pendiente de completar el grupo.'}
+
+
+def request_partial_release(db, user, data):
+    case, orders, production = _scanner_context(db, user, data.scan_id, lock=True)
+    existing_key = db.scalar(select(PartialReleaseRequest).where(PartialReleaseRequest.request_key == data.request_key))
+    if existing_key:
+        if existing_key.requester_id != user.id or existing_key.production_id != production.id or existing_key.request_comment != data.comment:
+            fail('La clave de reintento ya pertenece a otra solicitud.', 409)
+        return {'id': existing_key.id, 'status': existing_key.status, 'order': _scanner_order_summary(db, case, production),
+            'pending_orders': _release_group_pending(db, case, orders), 'message': 'La solicitud de excepción ya está registrada.'}
+    if (case.lifecycle != 'Activo' or production.cancelled_at or production.blocked_since or production.stage != 'WORKSHOP'
+        or delivery_status(db, case.id, production.id) == 'Completa' or not _scan_confirmed(production)):
+        fail('La orden debe tener una confirmación vigente de encuadernación y estar activa, desbloqueada y sin entregar.', 409)
+    missing = _release_group_pending(db, case, orders)
+    if not missing:
+        fail('El grupo no tiene otras órdenes pendientes. La liberación normal ya está disponible.', 409)
+    prior = db.scalar(select(PartialReleaseRequest.id).where(PartialReleaseRequest.production_id == production.id,
+        PartialReleaseRequest.production_cycle == production.workflow_cycle, PartialReleaseRequest.status == 'Pendiente'))
+    if prior:
+        fail('Ya hay una excepción pendiente para esta orden y este ciclo.', 409)
+    comment = data.comment.strip()
+    if not comment:
+        fail('Escribe el motivo operativo de la liberación parcial.')
+    request = PartialReleaseRequest(case_id=case.id, production_id=production.id, production_cycle=production.workflow_cycle,
+        requester_id=user.id, request_comment=comment, request_key=data.request_key)
+    case.version += 1
+    db.add(request)
+    db.flush()
+    event(db, case, user, f"Se solicitó liberar OP-{production.id:05d} antes de completar el grupo. {comment}", data={
+        'action': 'partial_release_requested', 'request_id': request.id, 'production_id': production.id,
+        'production_cycle': production.workflow_cycle, 'origin': 'scanner'})
+    return {'id': request.id, 'status': request.status, 'order': _scanner_order_summary(db, case, production),
+        'pending_orders': missing, 'message': 'Solicitud de excepción enviada para autorización.'}
+
+
+def _partial_release_view(db, request):
+    case = db.get(Case, request.case_id)
+    production = db.get(Production, request.production_id)
+    requester = db.get(User, request.requester_id)
+    return {'id': request.id, 'status': request.status, 'case_number': f'CG-{case.id:06d}',
+        'subject': case.subject, 'production_id': production.id, 'order_number': f'OP-{production.id:05d}',
+        'stage': production.stage, 'stage_label': s.STAGE_LABELS.get(production.stage, 'Pendiente de clasificación'),
+        'production_cycle': request.production_cycle, 'current_cycle': production.workflow_cycle,
+        'requester': requester.name if requester else 'Cuenta desactivada', 'request_comment': request.request_comment,
+        'pending_orders': _release_group_pending(db, case, db.scalars(select(Production).where(Production.case_id == case.id).order_by(Production.id)).all()),
+        'created_at': request.created_at, 'decision_comment': request.decision_comment}
+
+
+def pending_partial_releases(db, user):
+    require(db, user, 'partial_release_approve')
+    requests = db.scalars(select(PartialReleaseRequest).where(PartialReleaseRequest.status == 'Pendiente').order_by(PartialReleaseRequest.created_at, PartialReleaseRequest.id)).all()
+    return [_partial_release_view(db, request) for request in requests]
+
+
+def scanner_exception_result(db, user, request_id):
+    require_binding_scanner(db, user)
+    request = db.get(PartialReleaseRequest, request_id)
+    if not request or request.requester_id != user.id:
+        fail('No existe una solicitud de excepción propia con ese identificador.', 404)
+    case = db.get(Case, request.case_id)
+    production = db.get(Production, request.production_id)
+    orders = db.scalars(select(Production).where(Production.case_id == case.id).order_by(Production.id)).all()
+    return {'id': request.id, 'status': request.status,
+        'decision_comment': request.decision_comment,
+        'order': _scanner_order_summary(db, case, production),
+        'pending_orders': _release_group_pending(db, case, orders)}
+
+
+def decide_partial_release(db, user, request_id, data):
+    require(db, user, 'partial_release_approve')
+    ref = db.get(PartialReleaseRequest, request_id)
+    if not ref:
+        fail('Solicitud de liberación no encontrada', 404)
+    case = db.scalar(select(Case).where(Case.id == ref.case_id).with_for_update().execution_options(populate_existing=True))
+    orders = db.scalars(select(Production).where(Production.case_id == case.id).order_by(Production.id).with_for_update().execution_options(populate_existing=True)).all()
+    request = db.scalar(select(PartialReleaseRequest).where(PartialReleaseRequest.id == request_id).with_for_update())
+    production = next((order for order in orders if order.id == request.production_id), None)
+    if request.status != 'Pendiente':
+        expected = 'Aprobada' if data.approve else 'Rechazada'
+        if request.status == expected and request.approver_id == user.id and request.decision_comment == data.comment:
+            return _partial_release_view(db, request) | {'message': 'La decisión ya estaba registrada.'}
+        fail('La excepción ya tuvo una decisión.', 409)
+    if request.requester_id == user.id:
+        fail('La persona que solicitó la excepción no puede autorizarla.', 403)
+    valid = bool(case.lifecycle == 'Activo' and production and request.production_cycle == production.workflow_cycle
+        and _scan_confirmed(production) and production.stage == 'WORKSHOP' and not production.blocked_since
+        and not production.cancelled_at and delivery_status(db, case.id, production.id) != 'Completa')
+    if not valid:
+        request.status = 'Invalidada'
+        request.decided_at = now()
+        case.version += 1
+        event(db, case, user, f"La excepción de OP-{request.production_id:05d} se invalidó porque cambió la orden o el ciclo.", data={
+            'action': 'partial_release_invalidated', 'request_id': request.id, 'production_id': request.production_id,
+            'origin': 'revalidation'})
+        return _partial_release_view(db, request) | {'message': 'La orden cambió: la aprobación pendiente quedó invalidada y no se liberó.'}
+    comment = data.comment.strip()
+    if not comment:
+        fail('Escribe una justificación para registrar la decisión.')
+    decided_at = now()
+    request.status = 'Aprobada' if data.approve else 'Rechazada'
+    request.approver_id = user.id
+    request.decision_comment = comment
+    request.decided_at = decided_at
+    case.version += 1
+    if data.approve:
+        old = production.stage
+        production.stage = 'READY'
+        production.stage_started_at = decided_at
+        event(db, case, user, f"OP-{production.id:05d}: Encuadernación → Listo para entregar por liberación parcial autorizada. {comment}", data={
+            'action': 'stage', 'production_id': production.id, 'order_number': f'OP-{production.id:05d}', 'from': old, 'to': 'READY',
+            'origin': 'partial_release', 'request_id': request.id, 'requester_id': request.requester_id,
+            'approver_id': user.id, 'request_comment': request.request_comment, 'decision_comment': comment,
+            'production_cycle': production.workflow_cycle})
+        schedule_pickup_followup(db, case, user, production.id)
+    event(db, case, user, f"Excepción de liberación de OP-{production.id:05d}: {request.status}. {comment}", data={
+        'action': f'partial_release_{"approved" if data.approve else "rejected"}', 'request_id': request.id,
+        'production_id': production.id, 'requester_id': request.requester_id, 'approver_id': user.id,
+        'origin': 'crm'})
+    return _partial_release_view(db, request) | {'message': 'La orden quedó lista para entregar.' if data.approve else 'La excepción fue rechazada; la orden conserva su confirmación y sigue pendiente del grupo.'}
+
+
 # ---- Ciclo de producción: etapas, bloqueos y programación ----
 def change_stage(db, user, case_id, data):
     case, changed = mutation(db, user, case_id, data, 'stage', 'production')
     if not changed: return case
     production = get_production(db, case, data.production_id)
+    if data.stage == 'READY':
+        fail('Listo para entregar requiere el escaneo del grupo o una excepción autorizada.', 409)
     if production.blocked_since: fail('Resuelve el bloqueo antes de cambiar de etapa')
     if production.classification_required or production.stage is None:
         legacy = production.legacy_stage
@@ -415,7 +672,6 @@ def change_stage(db, user, case_id, data):
         production.classification_required = False
         production.stage_started_at = now()
         event(db, case, user, f'OP-{production.id:05d}: clasificación explícita de etapa histórica: {legacy or "Sin etapa legible"} → {s.STAGE_LABELS[data.stage]}', data={'action': 'stage_classified', 'production_id': production.id, 'legacy_stage': legacy, 'stage': data.stage, 'origin': 'manual_classification'})
-        if data.stage == 'READY': schedule_pickup_followup(db, case, user, production.id)
         return case
     old = production.stage
     if data.stage == old: fail('La etapa ya está activa', 409)
@@ -426,9 +682,17 @@ def change_stage(db, user, case_id, data):
     if moving_back and not data.reason: fail('El retroceso requiere motivo')
     if delivery_status(db, case.id, production.id) != 'Pendiente' and moving_back: fail('Esta orden ya tiene entregas; no se puede retroceder la etapa')
     duration = (now() - production.stage_started_at).total_seconds()
+    if moving_back and (production.binding_confirmed_at is not None or old == 'READY'):
+        previous_cycle = production.workflow_cycle
+        production.workflow_cycle += 1
+        production.binding_confirmed_cycle = None
+        production.binding_confirmed_at = None
+        production.binding_confirmed_by_id = None
+        event(db, case, user, f'Confirmación de encuadernación de OP-{production.id:05d} invalidada por reclamo; ciclo {production.workflow_cycle} iniciado.', data={
+            'action': 'binding_scan_invalidated', 'production_id': production.id, 'previous_cycle': previous_cycle,
+            'production_cycle': production.workflow_cycle, 'origin': 'rework'})
     production.stage, production.stage_started_at = data.stage, now()
     event(db, case, user, f'OP-{production.id:05d}: {s.STAGE_LABELS[old]} → {s.STAGE_LABELS[data.stage]}' + (f'. {data.reason}' if data.reason else ''), data={'action': 'stage', 'production_id': production.id, 'order_number': f'OP-{production.id:05d}', 'from': old, 'to': data.stage, 'seconds': duration, 'rework': moving_back})
-    if data.stage == 'READY': schedule_pickup_followup(db, case, user, production.id)
     return case
 
 

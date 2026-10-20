@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from .config import settings
 from .db import engine, SessionLocal
-from .routers import auth, clients, cases, production, reports
+from .routers import auth, clients, cases, production, reports, scanner
 from .services import reopen_overdue_attention
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ async def guard(request: Request, call_next):
         if request.headers.get('X-Comgraf-Request') != '1':
             return JSONResponse({'detail': 'Solicitud de origen no autorizado'}, 403)
         contract = request.headers.get('X-Comgraf-Contract')
-        if contract != '3':
+        if contract != '4':
             return JSONResponse({'detail': 'Contrato HTTP incompatible. Actualiza la interfaz y reinicia Comgraf.', 'code': 'CLIENT_CONTRACT_MISMATCH'}, 409)
         origin = request.headers.get('origin')
         if origin and urlparse(origin).netloc != request.headers.get('host'):
@@ -100,7 +100,7 @@ async def unavailable(request, error):
     return JSONResponse({'detail': 'La base de datos no está disponible o hubo un conflicto transaccional. Conserva el formulario y reintenta.'}, 503)
 
 
-for router in (auth.router, clients.router, cases.router, production.router, reports.router):
+for router in (auth.router, clients.router, cases.router, production.router, reports.router, scanner.router):
     app.include_router(router)
 
 
@@ -113,7 +113,7 @@ def health():
 
 @app.get('/api/version')
 def version():
-    return {'product': 'Comgraf', 'product_version': settings.product_version, 'build': settings.build_id, 'contract_version': '3'}
+    return {'product': 'Comgraf', 'product_version': settings.product_version, 'build': settings.build_id, 'contract_version': '4'}
 
 
 static = Path(settings.static_dir)

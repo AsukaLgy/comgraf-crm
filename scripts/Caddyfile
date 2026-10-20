@@ -1,0 +1,4 @@
+https://{$CAMERA_HOST}:8443 {
+	tls /certs/comgraf.pem /certs/comgraf-key.pem
+	reverse_proxy app:8000
+}

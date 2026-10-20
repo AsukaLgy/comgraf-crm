@@ -35,7 +35,7 @@ def accounts(migrate):
             if table.name != 'roles': conn.execute(table.delete())
     credentials = {}
     with SessionLocal.begin() as db:
-        for role, name in [('Administrador','admin'), ('Atención','agent'), ('Atención','agent2'), ('Producción','printer'), ('Cobranza','cashier')]:
+        for role, name in [('Administrador','admin'), ('Coordinador','coordinator'), ('Atención','agent'), ('Atención','agent2'), ('Producción','printer'), ('Cobranza','cashier'), ('Escáner de encuadernación','scanner'), ('Escáner de encuadernación','scanner2')]:
             password = secrets.token_urlsafe(20)
             user = User(username=name, name=name.title(), password_hash=passwords.hash(password), roles=[role], capacity=30)
             db.add(user)
@@ -48,7 +48,7 @@ def accounts(migrate):
 def clients(accounts):
     instances = {}
     for name, info in accounts.items():
-        client = TestClient(app, headers={'X-Comgraf-Request':'1', 'X-Comgraf-Contract':'3', 'X-Comgraf-Build':'1.2.0'})
+        client = TestClient(app, headers={'X-Comgraf-Request':'1', 'X-Comgraf-Contract':'4', 'X-Comgraf-Build':'1.4.0'})
         response = client.post('/api/auth/login', json={'username':name, 'password':info['password']})
         assert response.status_code == 200, response.text
         instances[name] = client

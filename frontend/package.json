@@ -1,6 +1,6 @@
 {
   "name": "comgraf",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "private": true,
   "overrides": {
     "esbuild": "0.28.1"
@@ -16,7 +16,9 @@
   },
   "dependencies": {
     "@tanstack/react-query": "5.90.21",
+    "@zxing/browser": "0.2.1",
     "lucide-react": "0.577.0",
+    "qrcode": "1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-router-dom": "7.18.4"

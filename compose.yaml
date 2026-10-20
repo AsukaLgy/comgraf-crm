@@ -38,6 +38,21 @@ services:
       timeout: 5s
       retries: 5
     networks: [internal, web]
+  camera_https:
+    image: caddy:2.11.7-alpine
+    profiles: [camera-https]
+    restart: unless-stopped
+    environment:
+      CAMERA_HOST: ${CAMERA_HOST:-localhost}
+    ports:
+      - '${CAMERA_BIND:-127.0.0.1}:${CAMERA_PORT:-8443}:8443'
+    volumes:
+      - ./.runtime/camera-https/server:/certs:ro
+      - ./scripts/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [internal]
 volumes:
   mysql_data:
   uploads:

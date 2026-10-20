@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 const credentials = JSON.parse(fs.readFileSync(path.resolve('../.runtime/e2e.json'), 'utf8'))
-const headers = { 'X-Comgraf-Request': '1', 'X-Comgraf-Contract': '3', 'X-Comgraf-Build': '1.2.0' }
+const headers = { 'X-Comgraf-Request': '1', 'X-Comgraf-Contract': '4', 'X-Comgraf-Build': '1.4.0' }
 let errors = []
 test.beforeEach(async ({ page }) => {
   errors = []
@@ -34,6 +34,34 @@ async function createCase(page, subject) {
   await expect(page.getByRole('dialog')).toHaveCount(0)
   return record
 }
+
+async function scanAsOperator(page, qr) {
+  const origin = new URL(page.url()).origin
+  const context = await page.context().browser().newContext({ baseURL: origin })
+  const scanner = await context.newPage()
+  await scanner.goto('/')
+  await scanner.getByLabel('Usuario', { exact: true }).fill(credentials.scanner_username)
+  await scanner.getByLabel('Contraseña', { exact: true }).fill(credentials.scanner_password)
+  await scanner.getByRole('button', { name: 'Iniciar sesión', exact: true }).click()
+  await expect(scanner.getByRole('heading', { name: 'Escáner de encuadernación' })).toBeVisible()
+  const response = await scanner.request.post('/api/scanner/scan', { headers, data: { scan_id: qr } })
+  await context.close()
+  return response
+}
+
+test('el rol escáner entra a una terminal aislada y no lee expedientes completos', async ({ page }) => {
+  await page.getByRole('button', { name: 'Cerrar sesión' }).click()
+  await expect(page.getByRole('heading', { name: 'Entrar al espacio de trabajo' })).toBeVisible()
+  await page.getByLabel('Usuario', { exact: true }).fill(credentials.scanner_username)
+  await page.getByLabel('Contraseña', { exact: true }).fill(credentials.scanner_password)
+  await page.getByRole('button', { name: 'Iniciar sesión', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Escáner de encuadernación' })).toBeVisible()
+  await expect(page.getByText('Escaneá el QR de la orden terminada.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Activar cámara' })).toBeVisible()
+  await expect(page.getByRole('navigation')).toHaveCount(0)
+  expect((await page.request.get('/api/cases')).status()).toBe(403)
+  expect((await page.request.get('/api/users')).status()).toBe(403)
+})
 
 test('tomar un caso sin asignar desde la bandeja actualiza la fila', async ({ page }) => {
   const subject = 'E2E caso para tomar desde bandeja ' + Date.now()
@@ -229,8 +257,12 @@ test('error real de validación conserva formulario y conversión mantiene exped
   await expect(
     page.getByText('Ojillos cada 50 cm; conservar este texto', { exact: true }),
   ).toBeVisible()
+  const qrImage = page.getByRole('img', { name: /QR estable de la orden/ })
+  await expect(qrImage).toBeVisible()
+  await expect(qrImage).toHaveJSProperty('naturalWidth', 240)
   await page.getByRole('link', { name: 'Ficha de taller' }).click()
   await expect(page.getByText(/NO AUTORIZADA/)).toHaveCount(0)
+  await expect(page.getByRole('img', { name: /QR estable de la orden/ })).toBeVisible()
   await page.screenshot({ path: '../.runtime/comgraf-ficha.png', fullPage: true })
 })
 
@@ -256,6 +288,7 @@ test('una solicitud admite varias partidas por orden y varias órdenes independi
   await expect(page.getByRole('heading', { name: 'Especificaciones de producción' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Banners y lonas' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Otros trabajos' })).toBeVisible()
+  await expect(page.getByRole('img', { name: /QR estable de la orden/ })).toBeVisible()
   const firstOrderLink = page.getByRole('list', { name: 'Órdenes de producción' }).locator('[role="listitem"]').first()
   const firstOrderUrl = await firstOrderLink.getAttribute('href')
   await page.getByRole('button', { name: 'Agregar orden de producción', exact: true }).click()
@@ -501,23 +534,25 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   await dialog.getByLabel('Versión del arte').fill('v1')
   await dialog.getByRole('button', { name: 'Guardar' }).click()
   await page.getByRole('button', { name: 'Producción' }).click()
-  for (const stage of ['Impresión', 'Encuadernación', 'Listo para entregar']) {
-    if (stage === 'Listo para entregar') {
-      await expect(page.getByRole('button', { name: 'Registrar reclamo', exact: true })).toBeVisible()
-      await page.getByRole('button', { name: 'Registrar reclamo', exact: true }).click()
-      dialog = page.getByRole('dialog')
-      await dialog.getByLabel('Regresar a').selectOption('PRINTING')
-      await dialog.getByLabel('Motivo del reclamo').fill('Ajuste interno de color, sin nuevo cargo.')
-      await dialog.getByRole('button', { name: 'Registrar reclamo', exact: true }).click()
-      await expect(page.getByRole('button', { name: 'Avanzar a Encuadernación' })).toBeVisible()
-      await page.getByRole('button', { name: 'Avanzar a Encuadernación' }).click()
-      dialog = page.getByRole('dialog')
-      await dialog.getByRole('button', { name: 'Avanzar a Encuadernación' }).click()
-    }
+  for (const stage of ['Impresión', 'Encuadernación']) {
     await page.getByRole('button', { name: `Avanzar a ${stage}` }).click()
     dialog = page.getByRole('dialog')
     await dialog.getByRole('button', { name: `Avanzar a ${stage}` }).click()
   }
+  await expect(page.getByText('Pendiente de escaneo', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Registrar reclamo', exact: true }).click()
+  dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Regresar a').selectOption('PRINTING')
+  await dialog.getByLabel('Motivo del reclamo').fill('Ajuste interno de color, sin nuevo cargo.')
+  await dialog.getByRole('button', { name: 'Registrar reclamo', exact: true }).click()
+  await page.getByRole('button', { name: 'Avanzar a Encuadernación' }).click()
+  dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Avanzar a Encuadernación' }).click()
+  const currentForScan = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  const scanResponse = await scanAsOperator(page, `CGOP1:${currentForScan.production.scan_id}`)
+  expect(scanResponse.ok()).toBeTruthy()
+  expect((await scanResponse.json()).result).toBe('released')
+  await page.reload()
   await expect(page.getByRole('button', { name: 'Registrar entrega', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Bloquear' }).click()
   dialog = page.getByRole('dialog')

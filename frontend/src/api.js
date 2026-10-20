@@ -1,7 +1,7 @@
 import {HNL_CURRENCY} from './domain'
 
-export const API_CONTRACT_VERSION = '3'
-export const PRODUCT_VERSION = '1.2.0'
+export const API_CONTRACT_VERSION = '4'
+export const PRODUCT_VERSION = '1.4.0'
 let contractCheck
 
 async function assertContract() {

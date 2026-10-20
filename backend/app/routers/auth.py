@@ -55,6 +55,8 @@ def users(user=Depends(current_user), db=Depends(get_db, scope='function')):
 def validate_roles(db, roles):
     if len(set(roles)) != len(roles) or any(not db.get(Role, r) for r in roles):
         raise HTTPException(422, 'Roles no válidos')
+    if 'Escáner de encuadernación' in roles and roles != ['Escáner de encuadernación']:
+        raise HTTPException(422, 'El rol de escaneo debe asignarse como rol exclusivo')
 
 
 @router.post('/users', status_code=201)
@@ -112,5 +114,7 @@ def update_role(name: str, data: RoleInput, user=Depends(current_user), db=Depen
     role = db.get(Role, name)
     if not role or name == 'Administrador' or '*' in data.permissions or any(p not in PERMISSIONS for p in data.permissions):
         raise HTTPException(422, 'Configuración de rol no permitida')
+    if name == 'Escáner de encuadernación' and set(data.permissions) != {'binding_scan'}:
+        raise HTTPException(422, 'El rol de escaneo debe conservar únicamente el permiso de escanear')
     role.permissions = list(set(data.permissions))
     return {'ok': True}

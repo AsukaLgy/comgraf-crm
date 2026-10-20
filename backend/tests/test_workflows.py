@@ -30,6 +30,24 @@ def mutate(client, case, path, body=None, expected=200):
     return must(client.post(f'/api/cases/{case["id"]}/{path}', json={'version':case['version'], 'key':key(), **(body or {})}), expected)
 
 
+def scan_order(clients, case):
+    qr = f"CGOP1:{case['production']['scan_id']}"
+    return must(clients['scanner'].post('/api/scanner/scan', json={'scan_id': qr}))
+
+
+def move_to_bindery(api, case, production_id=None):
+    current = mutate(api, case, 'production/stage', {'production_id': production_id, 'stage': 'PRINTING'} if production_id else {'stage': 'PRINTING'})
+    return mutate(api, current, 'production/stage', {'production_id': production_id, 'stage': 'WORKSHOP'} if production_id else {'stage': 'WORKSHOP'})
+
+
+def release_single_order(clients, case):
+    api = clients['admin']
+    current = move_to_bindery(api, case, case['production']['id'])
+    result = scan_order(clients, current)
+    assert result['result'] == 'released'
+    return must(api.get(f"/api/cases/{case['id']}?production_id={case['production']['id']}"))
+
+
 def item():
     return {'product':'Tarjetas de presentación','quantity':'100','unit':'unidades','unit_price':'10.00','specs':{'width':'9.000','height':'5.000','material':'Couché 300 g','sides':'2','inks':'CMYK'}}
 
@@ -58,29 +76,154 @@ def test_multiple_orders_keep_products_stages_deliveries_and_calendar_separate(c
     assert first_view['production']['stage']=='APPROVAL' and len(first_view['items'])==2
     assert second_view['production']['stage']=='PRINTING' and len(second_view['items'])==1
     assert first_view['balance']=='2000.00' and second_view['balance']=='500.00'
+    assert must(api.get('/api/cases',params={'view':'production','stage':'PRINTING'}))['total']==1
 
-    for stage in ['PRINTING','WORKSHOP','READY']:
-        first_view=mutate(api,first_view,'production/stage',{'production_id':first_id,'stage':stage})
+    first_view=move_to_bindery(api,first_view,first_id)
+    result=scan_order(clients,first_view)
+    assert result['result']=='confirmed_waiting'
+    assert result['pending_orders'][0]['order_number']==f'OP-{second_id:05d}'
+    assert result['pending_orders'][0]['reason']=='Etapa actual: Impresión'
+    second_view=must(api.get(f'/api/cases/{c["id"]}?production_id={second_id}'))
+    second_view=mutate(api,second_view,'production/stage',{'production_id':second_id,'stage':'WORKSHOP'})
+    result=scan_order(clients,second_view)
+    assert result['result']=='released' and set(result['released_orders'])=={f'OP-{first_id:05d}',f'OP-{second_id:05d}'}
+    first_view=must(api.get(f'/api/cases/{c["id"]}?production_id={first_id}'))
     first_item=first_view['items'][0]
     first_view=mutate(api,first_view,'deliveries',{'production_id':first_id,'item_id':first_item['id'],'quantity':'40','delivered_at':datetime.now(timezone.utc).isoformat(),'receiver':'Cliente','method':'Retiro','evidence':'Entrega parcial OP inicial'})
     second_view=must(api.get(f'/api/cases/{c["id"]}?production_id={second_id}'))
     assert first_view['delivery_status']=='Parcial' and len(first_view['deliveries'])==1
     assert second_view['delivery_status']=='Pendiente' and not second_view['deliveries']
-    assert second_view['production']['stage']=='PRINTING'
+    assert second_view['production']['stage']=='READY'
 
     all_orders=must(api.get('/api/orders?view=production'))
     ready_orders=must(api.get('/api/orders?view=ready'))
     counts=must(api.get('/api/counts'))
     assert all_orders['total']==2 and len(all_orders['items'])==2 and all_orders['count_type']=='órdenes'
-    assert ready_orders['total']==1 and ready_orders['items'][0]['id']==first_id
+    assert ready_orders['total']==2 and {row['id'] for row in ready_orders['items']}=={first_id,second_id}
+    assert ready_orders['items'][0]['id']==first_id
     assert ready_orders['items'][0]['pending_quantities'][0]['quantity']=='60.000'
-    assert counts['production_orders']==2 and counts['ready_orders']==1
-    assert must(api.get('/api/cases',params={'view':'production','stage':'PRINTING'}))['total']==1
+    assert counts['production_orders']==2 and counts['ready_orders']==2
+    assert must(api.get('/api/cases',params={'view':'production','stage':'PRINTING'}))['total']==0
 
     events=must(api.get('/api/calendar'))
     commitments=[e for e in events if e['type']=='Entrega comprometida']
     assert len(commitments)==2 and {e['production_id'] for e in commitments}=={first_id,second_id}
-    assert {e['stage'] for e in commitments}=={'Impresión','Listo para entregar'}
+    assert {e['stage'] for e in commitments}=={'Listo para entregar'}
+
+
+def test_binding_scans_are_idempotent_grouped_and_scanner_role_is_limited(clients, accounts):
+    api=clients['admin']; scanner=clients['scanner']; _,case=create(api,'Grupo de encuadernación')
+    case=mutate(api,case,'take'); first=mutate(api,case,'convert',conversion())
+    first_id=first['production']['id']; first_qr='CGOP1:'+first['production']['scan_id']
+    second=mutate(api,first,'convert',conversion()); second_id=second['production']['id']
+    second_qr='CGOP1:'+second['production']['scan_id']
+    assert first_qr!=second_qr
+    assert must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}'))['production']['scan_id']==first['production']['scan_id']
+    first=move_to_bindery(api,must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}')),first_id)
+    second=must(api.get(f'/api/cases/{case["id"]}?production_id={second_id}'))
+    second=mutate(api,second,'production/stage',{'production_id':second_id,'stage':'PRINTING'})
+    lookup=must(scanner.get('/api/scanner/lookup',params={'qr':first_qr}))
+    assert lookup['order']['order_number']==f'OP-{first_id:05d}' and lookup['order']['items'][0]['product']=='Tarjetas de presentación'
+    assert not {'balance','price','ledger','payment_status','quotes','notes'} & set(lookup)
+    assert scanner.get(f'/api/cases/{case["id"]}').status_code==403
+    assert scanner.get('/api/users').status_code==403
+    assert scanner.get('/api/orders').status_code==403
+    assert scanner.post(f'/api/cases/{case["id"]}/production/stage',json={'stage':'READY'}).status_code==403
+    assert clients['coordinator'].get('/api/scanner/lookup',params={'qr':first_qr}).status_code==403
+
+    first=must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}'))
+    blocked=mutate(api,first,'production/block',{'production_id':first_id,'reason':'Revisión de acabado'})
+    assert scanner.post('/api/scanner/scan',json={'scan_id':first_qr}).status_code==409
+    first=mutate(api,blocked,'production/unblock',{'production_id':first_id,'reason':'Acabado revisado'})
+    with ThreadPoolExecutor(2) as pool:
+        simultaneous=list(pool.map(lambda client: client.post('/api/scanner/scan',json={'scan_id':first_qr}),
+            [scanner,clients['scanner2']]))
+    assert [response.status_code for response in simultaneous]==[200,200]
+    results=[response.json() for response in simultaneous]
+    assert {result['result'] for result in results}=={'confirmed_waiting','already_confirmed'}
+    waiting=next(result for result in results if result['result']=='confirmed_waiting')
+    assert waiting['pending_orders'][0]['reason']=='Etapa actual: Impresión'
+    repeated=must(scanner.post('/api/scanner/scan',json={'scan_id':first_qr}))
+    assert repeated['result']=='already_confirmed'
+    assert scanner.post('/api/scanner/scan',json={'scan_id':second_qr}).status_code==409
+    first_after=must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}'))
+    assert first_after['production']['stage']=='WORKSHOP' and first_after['production']['binding_confirmed_cycle']==0
+    second=must(api.get(f'/api/cases/{case["id"]}?production_id={second_id}'))
+    second=mutate(api,second,'production/stage',{'production_id':second_id,'stage':'WORKSHOP'})
+    released=must(scanner.post('/api/scanner/scan',json={'scan_id':second_qr}))
+    assert released['result']=='released' and released['released_orders']==[f'OP-{first_id:05d}',f'OP-{second_id:05d}']
+    assert scanner.post('/api/scanner/scan',json={'scan_id':second_qr}).json()['result']=='already_confirmed'
+    after=must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}'))
+    assert after['production']['stage']=='READY' and not after['deliveries'] and after['balance']=='1000.00'
+    confirmations=[event for event in after['events'] if event['data'].get('action')=='binding_scan_confirmed' and event['data'].get('production_id')==first_id]
+    assert len(confirmations)==1 and confirmations[0]['actor_id'] in {accounts['scanner']['id'],accounts['scanner2']['id']}
+
+    # A real reclamo starts a new bindery cycle without rewinding its sibling.
+    after=mutate(api,after,'production/stage',{'production_id':first_id,'stage':'WORKSHOP','reason':'Reclamo: corregir acabado'})
+    assert after['production']['workflow_cycle']==1 and after['production']['binding_confirmed_at'] is None
+    scan_again=must(scanner.post('/api/scanner/scan',json={'scan_id':first_qr}))
+    assert scan_again['result']=='released'
+    sibling=must(api.get(f'/api/cases/{case["id"]}?production_id={second_id}'))
+    assert sibling['production']['stage']=='READY'
+    after_reclaim=must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}'))
+    confirmations=[event for event in after_reclaim['events'] if event['data'].get('action')=='binding_scan_confirmed' and event['data'].get('production_id')==first_id]
+    assert len(confirmations)==2
+
+
+def test_partial_release_requires_real_authorization_and_revalidates_cycle(clients):
+    api=clients['admin']; scanner=clients['scanner']; coordinator=clients['coordinator']
+    _,case=create(api,'Excepción de liberación')
+    case=mutate(api,case,'take'); first=mutate(api,case,'convert',conversion()); first_id=first['production']['id']
+    second=mutate(api,first,'convert',conversion())
+    first=move_to_bindery(api,must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}')),first_id)
+    scan_id='CGOP1:'+first['production']['scan_id']
+    waiting=must(scanner.post('/api/scanner/scan',json={'scan_id':scan_id}))
+    assert waiting['result']=='confirmed_waiting'
+    assert scanner.post('/api/scanner/exceptions',json={'scan_id':scan_id,'comment':' ','request_key':key()}).status_code==422
+    request_body={'scan_id':scan_id,'comment':'El cliente retira esta orden hoy','request_key':key()}
+    request=must(scanner.post('/api/scanner/exceptions',json=request_body),201)
+    replay=must(scanner.post('/api/scanner/exceptions',json=request_body),201)
+    assert replay['id']==request['id'] and coordinator.get('/api/scanner/exceptions').status_code==200
+    assert scanner.get('/api/scanner/exceptions').status_code==403
+    assert scanner.post(f'/api/scanner/exceptions/{request["id"]}/decision',json={'approve':True,'comment':'Autorizo la salida','request_key':key()}).status_code==403
+    approvals=must(coordinator.get('/api/scanner/exceptions'))
+    assert approvals[0]['request_comment']==request_body['comment'] and approvals[0]['pending_orders']
+    decision={'approve':True,'comment':'Coordinación confirmó la excepción operativa','request_key':key()}
+    approved=must(coordinator.post(f'/api/scanner/exceptions/{request["id"]}/decision',json=decision))
+    assert approved['status']=='Aprobada'
+    repeated=must(coordinator.post(f'/api/scanner/exceptions/{request["id"]}/decision',json=decision))
+    assert repeated['status']=='Aprobada'
+    order=must(api.get(f'/api/cases/{case["id"]}?production_id={first_id}'))
+    other=must(api.get(f'/api/cases/{case["id"]}?production_id={second["production"]["id"]}'))
+    assert order['production']['stage']=='READY' and other['production']['stage']=='APPROVAL'
+    assert order['lifecycle']=='Activo' and not order['deliveries'] and order['balance']=='1000.00'
+    scanner_result=must(scanner.get(f'/api/scanner/exceptions/{request["id"]}'))
+    assert scanner_result['status']=='Aprobada' and scanner_result['order']['stage']=='READY'
+
+    # A pending approval tied to an old cycle cannot release a reworked order.
+    _,stale_case=create(api,'Excepción invalidada por reclamo')
+    stale_case=mutate(api,stale_case,'take'); first=mutate(api,stale_case,'convert',conversion()); stale_id=first['production']['id']
+    second=mutate(api,first,'convert',conversion())
+    first=move_to_bindery(api,must(api.get(f'/api/cases/{stale_case["id"]}?production_id={stale_id}')),stale_id)
+    stale_qr='CGOP1:'+first['production']['scan_id']
+    must(scanner.post('/api/scanner/scan',json={'scan_id':stale_qr}))
+    stale_request=must(scanner.post('/api/scanner/exceptions',json={'scan_id':stale_qr,'comment':'Liberación pedida antes del reclamo','request_key':key()}),201)
+    first=must(api.get(f'/api/cases/{stale_case["id"]}?production_id={stale_id}'))
+    first=mutate(api,first,'production/stage',{'production_id':stale_id,'stage':'PRINTING','reason':'Corrección por reclamo'})
+    first=mutate(api,first,'production/stage',{'production_id':stale_id,'stage':'WORKSHOP'})
+    invalidated=must(coordinator.post(f'/api/scanner/exceptions/{stale_request["id"]}/decision',json={'approve':True,'comment':'Revisada por coordinación','request_key':key()}))
+    assert invalidated['status']=='Invalidada'
+    first=must(api.get(f'/api/cases/{stale_case["id"]}?production_id={stale_id}'))
+    assert first['production']['stage']=='WORKSHOP' and first['production']['workflow_cycle']==1
+
+
+def test_manual_ready_transition_is_forbidden(clients):
+    api=clients['admin']; _,case=create(api,'Transición manual controlada')
+    case=mutate(api,case,'take'); case=mutate(api,case,'convert',conversion())
+    case=move_to_bindery(api,case,case['production']['id'])
+    mutate(api,case,'production/stage',{'stage':'READY'},409)
+    current=must(api.get(f'/api/cases/{case["id"]}'))
+    assert current['production']['stage']=='WORKSHOP'
 
 
 def test_attention_history_search_and_drafts(clients):
@@ -154,7 +297,7 @@ def test_unassigned_pool_ignores_filters_and_take_persists_in_personal_views(cli
     assert must(api.get('/api/cases?view=mine'))['total']==1
     assert must(api.get('/api/cases?view=mine-action'))['total']==0
     assert must(api.get('/api/counts'))['mine']==1 and must(api.get('/api/counts'))['pool']==0
-    second_session=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'3','X-Comgraf-Build':'1.2.0'})
+    second_session=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'4','X-Comgraf-Build':'1.4.0'})
     must(second_session.post('/api/auth/login',json={'username':'admin','password':accounts['admin']['password']}))
     persisted=must(second_session.get('/api/cases?view=mine'))
     assert persisted['total']==1 and persisted['items'][0]['owner_id']==accounts['admin']['id']
@@ -193,8 +336,7 @@ def test_reassignment_moves_active_work_between_personal_views(clients,accounts)
 def test_automatic_production_completion_waits_for_delivery_payment_and_tasks(clients,accounts):
     api=clients['admin'];_,c=create(api,'Completar producción resuelta')
     c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
-    for stage in ['PRINTING','WORKSHOP','READY']:
-        c=mutate(api,c,'production/stage',{'stage':stage})
+    c=release_single_order(clients,c)
     c=mutate(api,c,'attention',{'status':'Cerrado'})
     c=mutate(api,c,'payments',{'amount':'1000.00','reference':'Pago completo'})
     assert c['lifecycle']=='Activo' and c['status']=='Cerrado'
@@ -227,8 +369,7 @@ def test_automatic_production_completion_waits_for_delivery_payment_and_tasks(cl
 def test_delivered_production_with_unpaid_balance_is_not_completed(clients):
     api=clients['admin'];_,c=create(api,'Entrega con saldo pendiente')
     c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
-    for stage in ['PRINTING','WORKSHOP','READY']:
-        c=mutate(api,c,'production/stage',{'stage':stage})
+    c=release_single_order(clients,c)
     delivery={'item_id':c['items'][0]['id'],'quantity':'100','delivered_at':datetime.now(timezone.utc).isoformat(),'receiver':'Cliente','method':'Retiro','evidence':'Trabajo entregado'}
     c=mutate(api,c,'deliveries',delivery)
     assert c['delivery_status']=='Completa' and c['balance']=='1000.00' and c['lifecycle']=='Activo'
@@ -354,8 +495,7 @@ def test_completion_reports_live_production_and_financial_blockers(clients):
 def test_weekly_pickup_followup_partial_and_full_delivery(clients):
     api=clients['admin'];_,c=create(api,'Waiting for pickup')
     c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
-    for stage in ['PRINTING','WORKSHOP','READY']:
-        c=mutate(api,c,'production/stage',{'stage':stage})
+    c=release_single_order(clients,c)
     pickup=[task for task in c['tasks'] if task['category']=='PICKUP']
     assert len(pickup)==1 and pickup[0]['owner_id']==c['owner_id']
     assert datetime.fromisoformat(pickup[0]['due_at'].replace('Z','+00:00')).date() >= (datetime.now(timezone.utc)+timedelta(days=6)).date()
@@ -375,8 +515,7 @@ def test_weekly_pickup_followup_partial_and_full_delivery(clients):
 def test_delivery_and_payment_are_one_idempotent_financial_operation(clients):
     api=clients['admin'];_,c=create(api,'Entrega con abono')
     c=mutate(api,c,'take');c=mutate(api,c,'convert',conversion())
-    for stage in ['PRINTING','WORKSHOP','READY']:
-        c=mutate(api,c,'production/stage',{'stage':stage})
+    c=release_single_order(clients,c)
     owner=c['owner_id']; stage=c['production']['stage']
     c=mutate(api,c,'attention',{'status':'Cerrado'})
     assert c['production']['stage']==stage and c['owner_id']==owner
@@ -513,13 +652,16 @@ def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts)
     assert repeated['balance']=='900.00' and len(repeated['ledger'])==2
     assert c['production']['specs_snapshot']['items'][0]['specs']['material']=='Couché 300 g'
     c=mutate(api,c,'production/block',{'reason':'Falta material'})
-    mutate(api,c,'production/stage',{'stage':'READY'},422)
+    mutate(api,c,'production/stage',{'stage':'READY'},409)
     c=mutate(api,c,'production/unblock',{'reason':'Material recibido'})
     c=mutate(api,c,'production/stage',{'stage':'WORKSHOP'})
     mutate(api,c,'production/stage',{'stage':'APPROVAL'},422)
     c=mutate(api,c,'production/stage',{'stage':'PRINTING','reason':'Retrabajo por diferencia de color'})
     c=mutate(api,c,'production/stage',{'stage':'WORKSHOP'})
-    c=mutate(api,c,'production/stage',{'stage':'READY'})
+    c=must(api.get(f'/api/cases/{c["id"]}'))
+    result=scan_order(clients,c)
+    assert result['result']=='released'
+    c=must(api.get(f'/api/cases/{c["id"]}'))
     assert c['delivery_status']=='Pendiente'
     delivery={'item_id':c['items'][0]['id'],'quantity':'40','delivered_at':datetime.now(timezone.utc).isoformat(),'receiver':'María','method':'Retiro','evidence':'Recibo firmado 01'}
     c=mutate(api,c,'deliveries',delivery)
@@ -532,6 +674,8 @@ def test_production_quote_delivery_debt_and_idempotent_payment(clients,accounts)
     c=mutate(api,c,'payments',{'amount':'900','reference':'Recibo 002'})
     assert c['payment_status']=='Pagado'
     assert c['lifecycle']=='Completado'
+    repeated_scan=must(clients['scanner'].post('/api/scanner/scan',json={'scan_id':'CGOP1:'+c['production']['scan_id']}))
+    assert repeated_scan['result']=='already_confirmed' and repeated_scan['order']['delivery_complete']
     c=mutate(api,c,'reactivate')
     entry=c['ledger'][-1]['id']
     c=mutate(api,c,f'payments/{entry}/reverse',{'reason':'Transferencia rechazada'})
@@ -632,7 +776,7 @@ def test_cancellation_without_finance_queues_review_then_resolves(clients,accoun
         db.add(Role(name=role_name,permissions=['production']))
         user=User(username='cancelador',name='Cancelador',password_hash='unused',roles=[role_name],capacity=20)
         db.add(user);db.flush(); uid=user.id
-    api=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'3'})
+    api=TestClient(app,headers={'X-Comgraf-Request':'1','X-Comgraf-Contract':'4'})
     with SessionLocal.begin() as db:
         user=db.get(User,uid)
         user.password_hash=__import__('app.security',fromlist=['passwords']).passwords.hash('cancelador-password-2026')

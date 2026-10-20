@@ -161,6 +161,13 @@ export default function ProductionStages({ record, canManage, onSchedule, onDeli
                       </button>
                     )}
                   </>
+                ) : production.stage === PRODUCTION_STAGE.WORKSHOP ? (
+                  <div className="binding-stage-gate">
+                    <Badge tone={production.binding_confirmed_at && production.binding_confirmed_cycle === production.workflow_cycle ? 'teal' : 'amber'}>
+                      {production.binding_confirmed_at && production.binding_confirmed_cycle === production.workflow_cycle ? 'Encuadernación confirmada' : 'Pendiente de escaneo'}
+                    </Badge>
+                    <small>La terminal de escaneo habilita la entrega cuando se complete el grupo de órdenes.</small>
+                  </div>
                 ) : (
                   <>
                     <button

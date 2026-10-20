@@ -52,10 +52,11 @@ Instantes UTC en MySQL; presentación y límites de día en `APP_TIMEZONE` (Amer
 | Rol inicial | Lectura | Acciones |
 |---|---|---|
 | Administrador | Todo | Todo, usuarios y roles |
-| Coordinador | Todo | Asignación, reapertura, atención, taller, cobros, ajustes |
+| Coordinador | Todo | Asignación, reapertura, atención, producción, cobros, ajustes y autorización de liberación parcial |
 | Atención | Todos los casos y clientes, importes comerciales | Clientes; tomar; atender/cotizar/convertir sus casos |
 | Producción | Casos en producción | Programación, etapas principales, archivos y entregas; sin saldos, precios ni eventos financieros |
 | Cobranza | Casos en producción e importes | Anticipos, abonos e indicadores; sin ajustes ni producción |
+| Escáner de encuadernación | Resumen mínimo de la orden leída y órdenes del grupo pendientes | Confirmar encuadernación y solicitar liberación parcial; rol exclusivo |
 
 Las capacidades de roles salvo Administrador son configurables. Varios roles acumulan permisos. La interfaz oculta acciones según permisos, pero cada endpoint vuelve a autorizarlas. Las asignaciones son responsabilidades operativas, no aislamiento entre empresas. El límite de capacidad utiliza expedientes asignados pendientes (atención abierta, tarea pendiente, producción no entregada/no anulada o saldo por gestionar) una sola vez; el indicador de atención inmediata cuenta por separado los casos que requieren acción.
 
@@ -79,8 +80,10 @@ No se implementó WebSocket, sincronización sin conexión, multitenencia, fisca
 
 El estado de atencion y el ciclo de vida son independientes. Un caso puede seguir Activo con atencion Cerrada; Completar caso es una accion manual y atomica, y solo procede cuando no quedan trabajos sin entregar, saldos, devoluciones, revisiones de anulacion, tareas abiertas ni interacciones entrantes pendientes. El servidor devuelve los pendientes concretos y no los resuelve por su cuenta. Reactivar conserva produccion, pagos, entregas y eventos anteriores. Los registros previos quedan Activos en la migracion 007, sin archivado por inferencia.
 
-Al entrar en Listo para entregar se crea una unica tarea PICKUP a siete dias, asignada al propietario principal si existe. La tarea se puede reprogramar; al resolver un contacto se puede crear el siguiente recordatorio semanal. Entrega parcial mantiene la tarea y la entrega completa resuelve solo las tareas PICKUP. La situacion de pago se calcula desde el ledger y nunca se deduce de Contado ni del tiempo que lleva sin recogerse.
+El paso de Encuadernación a Listo para entregar requiere confirmación del escáner para todas las órdenes todavía pendientes de habilitar en la solicitud. La confirmación queda asociada a la orden, ciclo, usuario y fecha del servidor. Una excepción autorizada libera solo la orden indicada y guarda solicitante, autorizador y justificación. La ruta de etapa ordinaria no puede saltarse ese control. Órdenes históricas que ya estaban listas conservan su etapa sin escaneos retroactivos. Al liberar se crea una única tarea PICKUP a siete días por orden, asignada al propietario principal si existe. La tarea se puede reprogramar; al resolver un contacto se puede crear el siguiente recordatorio semanal. Entrega parcial mantiene la tarea y la entrega completa resuelve solo las tareas PICKUP. La situación de pago se calcula desde el ledger y nunca se deduce del escaneo, de Contado ni del tiempo que lleva sin recogerse.
+
+Cada OP tiene un UUID de QR estable, que no es una credencial. El QR contiene solo el prefijo `CGOP1:` y ese UUID; consultar y confirmar requiere sesión del rol exclusivo. La terminal no reutiliza el endpoint de detalle del expediente y no devuelve importes, notas ni datos de cobro. Un reclamo que retrocede una orden invalida la confirmación y aumenta su ciclo; la confirmación anterior permanece en la bitácora.
 
 Las notas, incluidos los resumenes de llamada o visita, son internas. Correo y WhatsApp permanecen sin configurar; su interfaz no envia mensajes. Las comunicaciones manuales historicas de llamada y visita siguen visibles. La conversion registra referencias estructuradas de OP y la version exacta COT; la interfaz enlaza ambas dentro del mismo caso y aplica sus permisos.
 
-El contrato HTTP pasa a version 3 porque cambia el contrato de eventos y se agregan las acciones de ciclo de vida y seguimientos de recogida. Version de producto 1.2.0; actualiza frontend, aplica Alembic y reinicia FastAPI mediante el procedimiento de actualizacion.
+El contrato HTTP vigente es la versión 4 y el producto 1.4.0. La migración 009 agrega UUID de escaneo por orden, ciclos de confirmación y solicitudes auditables de excepción. Actualiza la interfaz y aplica Alembic antes de habilitar el escáner.

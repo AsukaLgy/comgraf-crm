@@ -29,6 +29,21 @@ class Input(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
 
 
+class BindingScanInput(Input):
+    scan_id: str = Field(pattern=r'^CGOP1:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$')
+
+
+class PartialReleaseRequestInput(BindingScanInput):
+    comment: str = Field(min_length=1, max_length=2000)
+    request_key: str = Field(min_length=20, max_length=80, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
+class PartialReleaseDecisionInput(Input):
+    approve: bool
+    comment: str = Field(min_length=1, max_length=1000)
+    request_key: str = Field(min_length=20, max_length=80, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
 # ---- Sesión, usuarios y perfiles comerciales ----
 class LoginInput(Input):
     username: str = Field(min_length=1, max_length=80)

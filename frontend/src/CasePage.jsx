@@ -8,6 +8,7 @@ import ProductForm, { Specifications } from './ProductForm'
 import CaseAttention from './CaseAttention'
 import CaseActivity from './CaseActivity'
 import CasePrintSheet from './CasePrintSheet'
+import OrderQRCode from './OrderQRCode'
 import DeliveryFinance from './DeliveryFinance'
 import ProductionStages from './ProductionStages'
 import { HNL_CURRENCY } from './domain'
@@ -408,6 +409,13 @@ export default function CasePage({ user, print = false }) {
                 Etapa actual: {p.stage_label || 'Pendiente de clasificación'}. Las especificaciones
                 capturadas al generar se conservan como referencia histórica.
               </div>
+              {p.stage === 'WORKSHOP' && (
+                <div className={p.binding_confirmed_at && p.binding_confirmed_cycle === p.workflow_cycle ? 'notice' : 'scanner-pending'}>
+                  {p.binding_confirmed_at && p.binding_confirmed_cycle === p.workflow_cycle
+                    ? `Encuadernación confirmada por ${person(p.binding_confirmed_by_id)} el ${date(p.binding_confirmed_at)}. La liberación depende del grupo de órdenes.`
+                    : 'Pendiente de confirmar encuadernación desde el escáner.'}
+                </div>
+              )}
               {c.items.map((i) => (
                 <article className="quote" key={i.id}>
                   <div className="section-line">
@@ -423,6 +431,7 @@ export default function CasePage({ user, print = false }) {
               ))}
               <h3>Instrucciones</h3>
               <p className="prewrap">{p.instructions || 'Sin instrucciones adicionales'}</p>
+              <OrderQRCode production={p} caseNumber={c.number} description={p.instructions || c.subject} client={c.client.name} compact />
               {can(user, 'production') &&
                 c.lifecycle !== 'Completado' &&
                 !p.cancelled_at &&

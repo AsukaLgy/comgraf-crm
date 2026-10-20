@@ -11,10 +11,11 @@ passwords = PasswordHash.recommended()
 DUMMY_HASH = passwords.hash(secrets.token_urlsafe(24))
 DEFAULT_ROLES = {
     'Administrador': ['*'],
-    'Coordinador': ['read_all', 'attention', 'assign', 'reopen', 'production', 'finance', 'adjust', 'clients', 'reports'],
+    'Coordinador': ['read_all', 'attention', 'assign', 'reopen', 'production', 'finance', 'adjust', 'clients', 'reports', 'partial_release_approve'],
     'Atención': ['attention', 'clients'],
     'Producción': ['production'],
     'Cobranza': ['finance', 'reports'],
+    'Escáner de encuadernación': ['binding_scan'],
 }
 PERMISSIONS = sorted({p for values in DEFAULT_ROLES.values() for p in values})
 
@@ -37,6 +38,11 @@ def require(db, user, permission):
         raise HTTPException(403, 'No tienes permiso para esta operación')
 
 
+def require_binding_scanner(db, user):
+    if user.roles != ['Escáner de encuadernación'] or not can(db, user, 'binding_scan'):
+        raise HTTPException(403, 'Esta operación requiere el rol Escáner de encuadernación')
+
+
 def current_user(request: Request, db=Depends(get_db, scope='function')):
     raw = request.cookies.get('comgraf_session', '')
     session = db.get(Session, digest(raw)) if raw else None
@@ -45,6 +51,10 @@ def current_user(request: Request, db=Depends(get_db, scope='function')):
     user = db.get(User, session.user_id)
     if not user or not user.active:
         raise HTTPException(401, 'Cuenta desactivada')
+    if 'Escáner de encuadernación' in user.roles:
+        allowed = request.url.path in {'/api/auth/me', '/api/auth/logout'} or request.url.path.startswith('/api/scanner/')
+        if user.roles != ['Escáner de encuadernación'] or not allowed:
+            raise HTTPException(403, 'Esta cuenta está limitada a la terminal de escaneo')
     return user
 
 

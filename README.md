@@ -54,6 +54,30 @@ Permite ese puerto solo desde la subred de trabajadores en el firewall. Los trab
 
 HTTP local funciona con `COOKIE_SECURE=false`. Si la LAN necesita cifrado, añade terminación TLS local y cambia a `COOKIE_SECURE=true`; no habilites esa variable en una dirección HTTP. La zona de operación se configura con `APP_TIMEZONE`, inicialmente `America/Tegucigalpa`.
 
+#### HTTPS local para el escáner Android
+
+El navegador solo habilita la cámara para un origen seguro. Comgraf incluye un proxy HTTPS local opcional con Caddy; no abre una ruta pública ni requiere servicios de certificados externos. Reserva una IP privada fija para el servidor y permite el puerto elegido únicamente desde la subred de la imprenta.
+
+1. Instala `mkcert` en el servidor siguiendo [su guía oficial](https://github.com/FiloSottile/mkcert#installation).
+2. Desde la raíz del proyecto, genera un certificado para la IP privada reservada:
+
+   ```sh
+   scripts/setup-camera-https.sh 192.168.1.20
+   ```
+
+   El certificado del proxy queda en `.runtime/camera-https/server`. La CA pública que Android debe confiar queda en `.runtime/camera-https/rootCA.pem`; **no copies `rootCA-key.pem` al teléfono ni la compartas**.
+3. En el `.env` del servidor establece `CAMERA_HOST=192.168.1.20`, `CAMERA_BIND=192.168.1.20`, `CAMERA_PORT=8443` y `COOKIE_SECURE=true`. Usa la misma IP del certificado. Después inicia el proxy:
+
+   ```sh
+   docker compose --profile camera-https up -d app camera_https
+   ```
+
+   El puerto 8443 se enlaza solo a esa interfaz privada. Configura el firewall para admitir únicamente la LAN; no lo publiques en el router. El proxy usa la red interna de Compose y reenvía al servicio Comgraf.
+4. Transfiere `rootCA.pem` al Android por un medio local de confianza e instálala como certificado de CA desde **Ajustes → Seguridad → Cifrado y credenciales → Instalar certificado de CA**. Los nombres del menú varían según el fabricante. Android puede pedir un PIN o patrón de bloqueo. Abre `https://192.168.1.20:8443`, comprueba que Chrome no muestre advertencias del certificado e inicia sesión con una cuenta individual asignada solo a **Escáner de encuadernación**.
+5. En Comgraf, abre Configuración → Usuarios y roles, crea esa cuenta con nombre identificable y el rol exclusivo. En el teléfono, permite la cámara para el sitio y pulsa **Activar cámara**. Si se denegó el permiso, vuelve a abrir la configuración del sitio en Chrome, cambia Cámara a Permitir y recarga.
+
+Los registros atribuyen cada confirmación al usuario autenticado. No uses una cuenta compartida si necesitas saber quién hizo el escaneo. Sin HTTPS confiable la página seguirá funcionando, pero el navegador no podrá iniciar la cámara; no desactives esta protección.
+
 ## Desarrollo sin Docker
 
 Requisitos: Python 3.14, Node 24, MySQL 8.4. Crea una base UTF-8 y un usuario restringido a esa base. Copia `.env.example` a `.env` y configura host/puerto/credenciales, `UPLOAD_DIR=../uploads`, `STATIC_DIR=../frontend/dist`.
@@ -111,7 +135,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start-local.ps1
 
 El actualizador comprueba la configuración, instala dependencias solo si cambiaron sus archivos de bloqueo (o con `-ForceDependencies`), compila React y aplica Alembic. Si algo falla, se detiene. Conserva `.env`, MySQL y los adjuntos; no borres `.runtime`.
 
-`/api/version` identifica versión de producto, build y contrato HTTP. Builds distintos no implican incompatibilidad por sí solos. Las operaciones de escritura exigen contrato HTTP 3. Ante incompatibilidad, ejecuta la actualización anterior y reinicia Python. El HTML exige revalidación y los assets conservan nombres versionados.
+`/api/version` identifica versión de producto, build y contrato HTTP. Builds distintos no implican incompatibilidad por sí solos. Las operaciones de escritura exigen contrato HTTP 4. Ante incompatibilidad, ejecuta la actualización anterior y reinicia Python. El HTML exige revalidación y los assets conservan nombres versionados.
 
 Las migraciones `005_commercial_cancellation` y `006_cancelled_stage_snapshot` agregan trazabilidad y marcan anulaciones existentes para revisión; no cambian pagos, saldos ni etapas sin clasificar, y no se editan después de aplicadas. Las anulaciones antiguas requieren revisión explícita; no se ponen en cero automáticamente.
 
