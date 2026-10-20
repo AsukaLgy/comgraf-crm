@@ -49,6 +49,14 @@ def row(obj, exclude=()):
     return result
 
 
+def item_row(obj, exclude=()):
+    result = row(obj, exclude)
+    if result and result.get('product') == 'Talonarios de factura CAI':
+        from .cai import cai_summary
+        result['cai_summary'] = cai_summary(result)
+    return result
+
+
 def visibility(db, user):
     if can(db, user, 'read_all') or can(db, user, 'attention'):
         return True
@@ -221,6 +229,9 @@ def case_summary(db, user, case):
 
 def case_detail(db, user, case, production_id=None):
     result = case_summary(db, user, case)
+    from .models import Contact
+    selected_contact = db.get(Contact, case.contact_id) if case.contact_id else None
+    result['case_contact'] = row(selected_contact) if selected_contact else None
     from .security import can
     result['completion_blockers'] = case_completion_blockers(db, case, show_finances=can(db, user, 'finance') or can(db, user, 'attention'))
     commercial = can(db, user, 'attention') or can(db, user, 'finance')
@@ -246,7 +257,7 @@ def case_detail(db, user, case, production_id=None):
         if model == Item and selected_production_id is not None: query = query.where(Item.production_id == selected_production_id)
         if model == Delivery and selected_production_id is not None: query = query.join(Item, Item.id == Delivery.item_id).where(Item.production_id == selected_production_id)
         objects = db.scalars(query.order_by(model.id))
-        result[name] = [row(o, ('storage_key',) if model == Attachment else ('unit_price',) if model == Item and not commercial else ()) for o in objects]
+        result[name] = [item_row(o, ('unit_price',) if not commercial else ()) if model == Item else row(o, ('storage_key',) if model == Attachment else ()) for o in objects]
         if model == Item:
             for item in result[name]: item.pop('substage', None)
     if not commercial:
@@ -255,6 +266,8 @@ def case_detail(db, user, case, production_id=None):
     if commercial:
         for quote in db.scalars(select(Quote).where(Quote.case_id == case.id).order_by(Quote.version)):
             value = row(quote)
+            from .cai import cai_summary
+            value['items'] = [{**item, **({'cai_summary': cai_summary(item)} if item.get('product') == 'Talonarios de factura CAI' else {})} for item in value.get('items', [])]
             linked = db.scalar(select(Production.id).where(Production.quote_id == quote.id))
             value['production_id'] = linked
             value['order_number'] = f'OP-{linked:05d}' if linked else None

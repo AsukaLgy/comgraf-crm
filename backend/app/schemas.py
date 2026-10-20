@@ -22,7 +22,7 @@ PREVIOUS_STAGES = {
     'WORKSHOP': {'NEW', 'APPROVAL', 'PRINTING'},
     'READY': {'NEW', 'APPROVAL', 'PRINTING', 'WORKSHOP'},
 }
-Product = Literal['Tarjetas de presentación', 'Talonarios y facturas', 'Volantes y flyers', 'Libretas y cuadernos', 'Banners y lonas', 'Otros trabajos']
+Product = Literal['Tarjetas de presentación', 'Talonarios y facturas', 'Talonarios de factura CAI', 'Volantes y flyers', 'Libretas y cuadernos', 'Banners y lonas', 'Otros trabajos']
 
 
 class Input(BaseModel):
@@ -178,6 +178,10 @@ class Specs(Input):
     binding: str = Field(default='', max_length=120)
     finishes: str = Field(default='', max_length=300)
     detail: str = Field(default='', max_length=3000)
+    cai_format: Literal['Media carta', 'Cuarto de carta', '8.5 × 7.25', '8.5 × 8.5', 'Carta'] | None = None
+    games_per_pad: Literal[25, 50] | None = None
+    paper_type: Literal['Bond', 'Químico'] | None = None
+    additional_copies: Literal[1, 2, 3] | None = None
 
 
 # ---- Cotización y conversión a una orden activa ----
@@ -187,6 +191,20 @@ class ItemInput(Input):
     unit: str = Field(default='unidades', min_length=1, max_length=30)
     unit_price: Money = Decimal('0')
     specs: Specs = Field(default_factory=Specs)
+
+    @model_validator(mode='after')
+    def cai_contract(self):
+        cai_fields = ('cai_format', 'games_per_pad', 'paper_type', 'additional_copies')
+        if self.product == 'Talonarios de factura CAI':
+            if self.unit != 'talonarios':
+                raise ValueError('La unidad comercial de Talonarios de factura CAI debe ser talonarios')
+            if self.quantity != self.quantity.to_integral_value():
+                raise ValueError('La cantidad de talonarios debe ser un entero positivo')
+            if any(getattr(self.specs, name) is None for name in cai_fields):
+                raise ValueError('Completa formato, juegos, papel y copias del talonario CAI')
+        elif any(getattr(self.specs, name) is not None for name in cai_fields):
+            raise ValueError('Las especificaciones CAI solo se permiten para Talonarios de factura CAI')
+        return self
 
 
 class QuoteInput(Mutation):
@@ -211,6 +229,9 @@ class Conversion(Mutation):
     payment_due_date: date
     delivery_method: str = Field(min_length=1, max_length=120)
     instructions: str = Field(default='', max_length=10000)
+    contact_id: int | None = Field(default=None, ge=1)
+    phone: str = Field(default='', max_length=60)
+    email: str = Field(default='', max_length=180)
 
 
 class StageInput(Mutation):

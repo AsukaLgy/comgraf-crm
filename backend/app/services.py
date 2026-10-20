@@ -5,7 +5,7 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
 from sqlalchemy import select, func
-from .models import Case, Client, Delivery, Event, Idempotency, Item, Ledger, PartialReleaseRequest, Production, Quote, Task, User, now
+from .models import Case, Client, Contact, Delivery, Event, Idempotency, Item, Ledger, PartialReleaseRequest, Production, Quote, Task, User, now
 from .security import can, require, require_binding_scanner
 from .repository import get_case, today, row, delivery_status, local_day, quantity_text, balance, attention_predicates, case_completion_blockers
 from . import schemas as s
@@ -402,9 +402,28 @@ def convert(db, user, case_id, data):
     else:
         quote = None
     if not items: fail('Agrega al menos un producto')
+    contact_id = data.contact_id if 'contact_id' in data.model_fields_set else case.contact_id
+    contact = db.get(Contact, contact_id) if contact_id else None
+    if contact_id and (not contact or contact.client_id != case.client_id):
+        fail('El contacto seleccionado no pertenece al cliente de esta solicitud')
+    client = db.get(Client, case.client_id)
+    allowed_phones, allowed_emails = set(client.phones or []), set(client.emails or [])
+    for registered in db.scalars(select(Contact).where(Contact.client_id == client.id)):
+        if registered.phone: allowed_phones.add(registered.phone)
+        if registered.email: allowed_emails.add(registered.email)
+    phone = data.phone or (contact.phone if contact and contact.phone else (next(iter(allowed_phones)) if len(allowed_phones) == 1 else ''))
+    email = data.email or (contact.email if contact and contact.email else (next(iter(allowed_emails)) if len(allowed_emails) == 1 else ''))
+    if phone and phone not in allowed_phones: fail('Selecciona un teléfono registrado del cliente')
+    if email and email not in allowed_emails: fail('Selecciona un correo registrado del cliente')
+    client_snapshot = {
+        'client_id': client.id, 'contact_id': contact.id if contact else None,
+        'company': client.company or '', 'person': contact.name if contact else (client.name if not client.company else ''),
+        'rtn': client.rtn or '', 'phone': phone, 'email': email,
+    }
     price = total(items)
     if data.advance_required > price: fail('El anticipo no puede superar el precio')
-    production = Production(case_id=case.id, created_by_id=user.id, quote_id=data.quote_id, stage='APPROVAL',
+    production = Production(case_id=case.id, created_by_id=user.id, quote_id=data.quote_id, contact_id=contact.id if contact else None,
+        client_snapshot=client_snapshot, stage='APPROVAL',
         requested_date=data.requested_date, original_committed_date=data.committed_date,
         committed_date=data.committed_date, price=price, currency=CURRENCY_HNL,
         payment_terms=data.payment_terms, advance_required=data.advance_required,
@@ -414,7 +433,8 @@ def convert(db, user, case_id, data):
     order_items = [Item(case_id=case.id, production_id=production.id, **item) for item in items]
     db.add_all(order_items)
     db.flush()
-    production.specs_snapshot = {'items': [row(item, ('substage',)) for item in order_items]}
+    from .cai import cai_summary
+    production.specs_snapshot = {'items': [{**row(item, ('substage',)), **({'cai_summary': cai_summary({'product': item.product, 'quantity': item.quantity, 'specs': item.specs})} if item.product == 'Talonarios de factura CAI' else {})} for item in order_items]}
     db.add(Ledger(case_id=case.id, production_id=production.id, kind='Obligación', amount=price, currency=CURRENCY_HNL,
         due_date=data.payment_due_date, reference='Orden de producción', actor_id=user.id))
     case.mode = 'Producción'

@@ -148,6 +148,8 @@ class Production(Base):
     binding_confirmed_at = Column(DateTime)
     binding_confirmed_by_id = Column(ForeignKey('users.id'))
     quote_id = Column(ForeignKey('quotes.id'), unique=True)
+    contact_id = Column(ForeignKey('contacts.id'))
+    client_snapshot = Column(JSON)
     # Legacy assignment column; current ownership is the case's principal owner.
     owner_id = Column(ForeignKey('users.id'))
     # Stable workflow code; NULL means an old stage needs explicit classification.

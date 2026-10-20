@@ -30,6 +30,7 @@ export const CASE_PRIORITIES = Object.freeze(['Baja', 'Normal', 'Alta', 'Urgente
 export const PRODUCT = Object.freeze({
   BUSINESS_CARDS: 'Tarjetas de presentación',
   FORMS: 'Talonarios y facturas',
+  CAI_FORMS: 'Talonarios de factura CAI',
   FLYERS: 'Volantes y flyers',
   NOTEBOOKS: 'Libretas y cuadernos',
   BANNERS: 'Banners y lonas',

@@ -786,6 +786,7 @@ export default function CasePage({ user, print = false }) {
       {(modal?.type === 'quote' || modal?.type === 'convert') && (
         <ProductForm
           record={c}
+          user={user}
           quote={modal.type === 'quote'}
           source={modal.source}
           onClose={close}

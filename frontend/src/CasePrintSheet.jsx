@@ -1,11 +1,203 @@
 import { Link } from 'react-router-dom'
 import { Printer } from 'lucide-react'
-import { date } from './api'
+import { date, money } from './api'
 import { Specifications } from './ProductForm'
 import OrderQRCode from './OrderQRCode'
 
+const caiDimensions = {
+  'Media carta': '5.5 × 8.5',
+  'Cuarto de carta': '4.25 × 5.5',
+  '8.5 × 7.25': '8.5 × 7.25',
+  '8.5 × 8.5': '8.5 × 8.5',
+  Carta: '8.5 × 11',
+}
+
+function printTextChunks(text, maxLength = 380) {
+  const source = String(text || '')
+  const chunks = []
+  let offset = 0
+  while (source.length - offset > maxLength) {
+    let end = source.lastIndexOf(' ', offset + maxLength)
+    if (end < offset + Math.floor(maxLength * 0.6)) end = offset + maxLength
+    chunks.push(source.slice(offset, end))
+    offset = end
+  }
+  if (offset < source.length) chunks.push(source.slice(offset))
+  return chunks
+}
+
 export default function CasePrintSheet({ id, record, person }) {
   const production = record.production
+  const printItems =
+    production?.specs_snapshot?.items || production?.approved_snapshot?.items || record.items || []
+  const isCai = printItems.some((item) => item.product === 'Talonarios de factura CAI')
+  if (production && isCai) {
+    const identity = production.client_snapshot || {
+      company: record.client.company || '',
+      person: record.case_contact?.name || (!record.client.company ? record.client.name : ''),
+      rtn: record.client.rtn || '',
+      phone: record.case_contact?.phone || record.client.phones?.[0] || '',
+      email: record.case_contact?.email || record.client.emails?.[0] || '',
+    }
+    return (
+      <article className="print-sheet cai-print">
+        <div className="print-actions">
+          <button onClick={() => window.print()}>
+            <Printer size={16} />
+            Imprimir / Guardar PDF
+          </button>
+          <Link to={`/cases/${id}?production_id=${production.id}`}>Volver a la orden</Link>
+        </div>
+        <header className="cai-print-header">
+          <div className="brand-name">
+            Comgraf <small>| Comunicación Gráfica</small>
+          </div>
+          <div className="cai-header-id">
+            <strong>{production.order_number}</strong>
+            <span>Solicitud {record.number}</span>
+          </div>
+        </header>
+        <h1>Orden de producción — Talonarios de factura CAI</h1>
+        <div className="cai-meta">
+          <span>
+            <b>Creada:</b> {date(production.created_at)} · {person(production.created_by_id)}
+          </span>
+          {production.committed_date && (
+            <span>
+              <b>Fecha comprometida:</b> {date(production.committed_date)}
+            </span>
+          )}
+        </div>
+        <section className="cai-client">
+          <h2>Datos del cliente</h2>
+          <div>
+            <span>
+              <b>Empresa:</b> {identity.company || '—'}
+            </span>
+            <span>
+              <b>Persona:</b> {identity.person || '—'}
+            </span>
+            <span>
+              <b>RTN:</b> {identity.rtn || '—'}
+            </span>
+            <span>
+              <b>Teléfono:</b> {identity.phone || '—'}
+            </span>
+            <span>
+              <b>Correo:</b> {identity.email || '—'}
+            </span>
+          </div>
+        </section>
+        <h2 className="cai-items-title">
+          Especificaciones de la orden · {production.order_number}
+        </h2>
+        {printItems.map((item, index) => {
+          const specs = item.specs || {},
+            quantity = Number(item.quantity || 0),
+            games = Number(
+              item.cai_summary?.total_games ?? quantity * Number(specs.games_per_pad || 0),
+            ),
+            perGame = Number(
+              item.cai_summary?.sheets_per_game ?? 1 + Number(specs.additional_copies || 0),
+            ),
+            finishedSheets = Number(item.cai_summary?.finished_sheets ?? games * perGame)
+          return (
+            <section className="cai-item" key={item.id || index}>
+              <h3>
+                {production.order_number} · Partida {index + 1} · {item.product}
+              </h3>
+              <dl>
+                <div>
+                  <dt>Formato</dt>
+                  <dd>
+                    {specs.cai_format || '—'}
+                    {caiDimensions[specs.cai_format]
+                      ? ` (${caiDimensions[specs.cai_format]} pulgadas)`
+                      : ''}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Juegos por talonario</dt>
+                  <dd>{specs.games_per_pad || '—'}</dd>
+                </div>
+                <div>
+                  <dt>Tipo de papel</dt>
+                  <dd>{specs.paper_type || '—'}</dd>
+                </div>
+                <div>
+                  <dt>Copias adicionales al original</dt>
+                  <dd>
+                    {specs.additional_copies || '—'} · Original + {specs.additional_copies || 0}{' '}
+                    copia{Number(specs.additional_copies) === 1 ? '' : 's'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Cantidad de talonarios</dt>
+                  <dd>{quantity}</dd>
+                </div>
+                <div>
+                  <dt>Total de juegos</dt>
+                  <dd>{games}</dd>
+                </div>
+                <div>
+                  <dt>Hojas por juego</dt>
+                  <dd>{perGame}</dd>
+                </div>
+                <div>
+                  <dt>Hojas del producto terminado</dt>
+                  <dd>{finishedSheets}</dd>
+                </div>
+                {item.unit_price !== undefined && (
+                  <div>
+                    <dt>Precio por talonario</dt>
+                    <dd>{money(item.unit_price, 'HNL')}</dd>
+                  </div>
+                )}
+                {item.unit_price !== undefined && (
+                  <div>
+                    <dt>Importe de partida</dt>
+                    <dd>{money(quantity * Number(item.unit_price), 'HNL')}</dd>
+                  </div>
+                )}
+              </dl>
+              {printTextChunks(specs.detail).map((chunk, chunkIndex) => (
+                <p className="prewrap cai-observations" key={chunkIndex}>
+                  <b>
+                    {production.order_number} · Observaciones
+                    {chunkIndex ? ' (continuación)' : ''}:
+                  </b>{' '}
+                  {chunk}
+                </p>
+              ))}
+            </section>
+          )
+        })}
+        {production.instructions && (
+          <section className="cai-item">
+            <h3>{production.order_number} · Instrucciones de producción</h3>
+            {printTextChunks(production.instructions).map((chunk, chunkIndex) => (
+              <p className="prewrap cai-observations" key={chunkIndex}>
+                <b>
+                  {production.order_number} · Instrucciones
+                  {chunkIndex ? ' (continuación)' : ''}:
+                </b>{' '}
+                {chunk}
+              </p>
+            ))}
+          </section>
+        )}
+        <div className="cai-qr">
+          <OrderQRCode
+            production={production}
+            caseNumber={record.number}
+            description="Talonarios de factura CAI"
+            client={identity.company || identity.person}
+            numberBelow
+          />
+        </div>
+      </article>
+    )
+  }
   return (
     <article className="print-sheet">
       <div className="print-actions">
@@ -13,14 +205,20 @@ export default function CasePrintSheet({ id, record, person }) {
           <Printer size={16} />
           Imprimir / Guardar PDF
         </button>
-        <Link to={`/cases/${id}${production?.id ? `?production_id=${production.id}` : ''}`}>Volver a la solicitud</Link>
+        <Link to={`/cases/${id}${production?.id ? `?production_id=${production.id}` : ''}`}>
+          Volver a la solicitud
+        </Link>
       </div>
       <header>
         <div>
           <div className="brand-name">COMGRAF</div>
           <p>Comunicación Gráfica · Ficha de taller</p>
         </div>
-        <h1>{record.number}<br/><small>{production?.order_number || 'Orden de producción'}</small></h1>
+        <h1>
+          {record.number}
+          <br />
+          <small>{production?.order_number || 'Orden de producción'}</small>
+        </h1>
       </header>
       {!production ? (
         <p>Esta solicitud está en Atención y no tiene ficha de producción.</p>
@@ -59,7 +257,12 @@ export default function CasePrintSheet({ id, record, person }) {
             </p>
           ))}
           <p>Modalidad de entrega: {production.delivery_method}</p>
-          <OrderQRCode production={production} caseNumber={record.number} description={production.instructions || record.subject} client={record.client.name} />
+          <OrderQRCode
+            production={production}
+            caseNumber={record.number}
+            description={production.instructions || record.subject}
+            client={record.client.name}
+          />
         </>
       )}
     </article>

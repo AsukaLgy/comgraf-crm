@@ -115,6 +115,8 @@ Desde una solicitud se pueden guardar borradores, elegir destinatario y adjuntos
 
 Las migraciones aditivas `010_yahoo_mail` y `011_mail_retry_idempotency` agregan configuración cifrada, progreso IMAP, mensajes, adjuntos y salida idempotente; no reconstruyen la base. Antes de actualizar, respalda MySQL y adjuntos. En Compose, `app.start` aplica las migraciones y levanta un trabajador coordinado por bloqueo MySQL para evitar sincronizadores duplicados. La integración necesita una conexión saliente a Yahoo; el CRM local sigue abriendo si Internet no está disponible. La conexión real se valida al configurar el buzón desde la pantalla de administración.
 
+La migración `012_cai_order_snapshot` agrega a cada orden una referencia opcional al contacto y una instantánea de los datos comerciales usados al crearla. Las órdenes anteriores conservan sus datos; no se convierten talonarios históricos al producto CAI ni se inventan instantáneas retroactivas.
+
 ## Actualización
 
 En Windows local, respalda primero SQL y adjuntos, detén Comgraf con Ctrl+C en la terminal `start-local.ps1` y ejecuta desde la raíz:
