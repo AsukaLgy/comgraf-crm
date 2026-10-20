@@ -34,53 +34,39 @@ En una carpeta nueva con este código:
 
 ```sh
 python scripts/configure.py
+sudo apt install mkcert libnss3-tools
+mkcert -install
+scripts/setup-https.sh localhost
 docker compose up -d --build
 docker compose exec app python -m app.cli create-admin
 ```
 
-Abrir **http://127.0.0.1:8080**. Si ya tienes `.env`, `configure.py` se niega a sobrescribirlo. Ajusta sus variables; Compose fuerza host `db`, puerto `3306` y rutas internas, por lo que puede utilizar las claves existentes. Los volúmenes de Compose son independientes de la base portátil; no se importan datos automáticamente entre instalaciones.
+Abrir **https://localhost**. La URL HTTP local redirige a HTTPS. Si ya tienes `.env`, `configure.py` se niega a sobrescribirlo. Ajusta sus variables; Compose fuerza host `db`, puerto `3306` y rutas internas, por lo que puede utilizar las claves existentes. Los volúmenes de Compose son independientes de la base portátil; no se importan datos automáticamente entre instalaciones.
 
 MySQL no publica ningún puerto. Solo Python habla con MySQL; React usa `/api`. La imagen sirve recursos compilados locales. Los contenedores se comunican por una red interna. La aplicación se ejecuta como usuario sin privilegios. Los volúmenes conservan MySQL y adjuntos al recrear servicios; **no uses `docker compose down -v` para actualizar**.
 
-### Trabajadores en la red local
+### HTTPS para toda la aplicación en la red local
 
-En `.env`, cambia `APP_HOST` de `127.0.0.1` a la IP privada fija del equipo servidor (ejemplo `192.168.1.20`), conserva `APP_PORT=8080` y ejecuta:
+El proxy Caddy protege toda la interfaz y API, no solo la pantalla del escáner. No abre una ruta pública ni requiere servicios de certificados externos. Reserva una IP privada fija para este equipo; en el ejemplo se usa `192.168.1.20`.
 
-```sh
-docker compose up -d
-```
-
-Permite ese puerto solo desde la subred de trabajadores en el firewall. Los trabajadores abren `http://IP_PRIVADA:8080`. No abras puertos en el router ni publiques dominios o túneles a Internet. No necesitan MySQL, Python ni Node en sus computadoras.
-
-HTTP local funciona con `COOKIE_SECURE=false`. Si la LAN necesita cifrado, añade terminación TLS local y cambia a `COOKIE_SECURE=true`; no habilites esa variable en una dirección HTTP. La zona de operación se configura con `APP_TIMEZONE`, inicialmente `America/Tegucigalpa`.
-
-#### HTTPS local para el escáner Android
-
-El navegador solo habilita la cámara para un origen seguro. Comgraf incluye un proxy HTTPS local opcional con Caddy; no abre una ruta pública ni requiere servicios de certificados externos. Reserva una IP privada fija para el servidor y permite el puerto elegido únicamente desde la subred de la imprenta.
-
-1. Instala `mkcert` en el servidor siguiendo [su guía oficial](https://github.com/FiloSottile/mkcert#installation).
-2. Desde la raíz del proyecto, genera un certificado para la IP privada reservada:
+1. Instala `mkcert` y sus herramientas NSS siguiendo [la guía oficial](https://github.com/FiloSottile/mkcert#installation), instala su CA local con `mkcert -install` y genera el certificado:
 
    ```sh
-   scripts/setup-camera-https.sh 192.168.1.20
+   scripts/setup-https.sh 192.168.1.20
    ```
 
-   El certificado del proxy queda en `.runtime/camera-https/server`. La CA pública que Android debe confiar queda en `.runtime/camera-https/rootCA.pem`; **no copies `rootCA-key.pem` al teléfono ni la compartas**.
-3. En el `.env` del servidor establece `CAMERA_HOST=192.168.1.20`, `CAMERA_BIND=192.168.1.20`, `CAMERA_PORT=8443` y `COOKIE_SECURE=true`. Usa la misma IP del certificado. Después inicia el proxy:
+   En `.env`, establece `HTTPS_HOST=192.168.1.20`, `HTTPS_BIND=192.168.1.20`, `HTTP_BIND=192.168.1.20`, `HTTP_REDIRECT_PORT=8080` y `COOKIE_SECURE=true`. Conserva `HTTPS_PORT=443`. Usa la misma IP reservada en el certificado y en estos valores.
+2. Permite TCP 443 y el puerto HTTP de redirección únicamente desde la subred de la imprenta. El puerto 443 sirve el CRM; el HTTP antiguo solo redirige a HTTPS. No abras puertos en el router ni publiques dominios o túneles a Internet. Reinicia con `docker compose up -d`.
+3. Abre **`https://192.168.1.20`**. Los datos de acceso y la sesión viajan por HTTPS; `COOKIE_SECURE=true` evita enviar la cookie de sesión por HTTP.
+4. Para cada teléfono o computadora que deba confiar en el certificado, transfiere `.runtime/camera-https/rootCA.crt` por un medio local confiable e instala ese archivo como certificado de CA. En Android suele estar en **Ajustes → Seguridad → Cifrado y credenciales → Instalar certificado de CA**; los nombres varían por fabricante. Android puede pedir un PIN o patrón. Comprueba que el navegador no muestre advertencias del certificado.
 
-   ```sh
-   docker compose --profile camera-https up -d app camera_https
-   ```
+**No compartas `rootCA-key.pem`**: esa clave privada puede emitir certificados para cualquier sitio. La CA pública `rootCA.pem` sí se instala en los dispositivos. Sin confiar en esa CA, el navegador mostrará una advertencia y no habilitará la cámara. En dispositivos de escaneo, inicia sesión con cuentas individuales asignadas al rol **Escáner de encuadernación**.
 
-   El puerto 8443 se enlaza solo a esa interfaz privada. Configura el firewall para admitir únicamente la LAN; no lo publiques en el router. El proxy usa la red interna de Compose y reenvía al servicio Comgraf.
-4. Transfiere `rootCA.pem` al Android por un medio local de confianza e instálala como certificado de CA desde **Ajustes → Seguridad → Cifrado y credenciales → Instalar certificado de CA**. Los nombres del menú varían según el fabricante. Android puede pedir un PIN o patrón de bloqueo. Abre `https://192.168.1.20:8443`, comprueba que Chrome no muestre advertencias del certificado e inicia sesión con una cuenta individual asignada solo a **Escáner de encuadernación**.
-5. En Comgraf, abre Configuración → Usuarios y roles, crea esa cuenta con nombre identificable y el rol exclusivo. En el teléfono, permite la cámara para el sitio y pulsa **Activar cámara**. Si se denegó el permiso, vuelve a abrir la configuración del sitio en Chrome, cambia Cámara a Permitir y recarga.
-
-Los registros atribuyen cada confirmación al usuario autenticado. No uses una cuenta compartida si necesitas saber quién hizo el escaneo. Sin HTTPS confiable la página seguirá funcionando, pero el navegador no podrá iniciar la cámara; no desactives esta protección.
+La zona de operación se configura con `APP_TIMEZONE`, inicialmente `America/Tegucigalpa`. No se exponen MySQL ni el puerto interno de la aplicación a la LAN.
 
 ## Desarrollo sin Docker
 
-Requisitos: Python 3.14, Node 24, MySQL 8.4. Crea una base UTF-8 y un usuario restringido a esa base. Copia `.env.example` a `.env` y configura host/puerto/credenciales, `UPLOAD_DIR=../uploads`, `STATIC_DIR=../frontend/dist`.
+Requisitos: Python 3.14, Node 24, MySQL 8.4. Crea una base UTF-8 y un usuario restringido a esa base. Copia `.env.example` a `.env` y configura host/puerto/credenciales, `UPLOAD_DIR=../uploads`, `STATIC_DIR=../frontend/dist`. Como el servidor de desarrollo se abre por HTTP, establece `COOKIE_SECURE=false` solo en ese entorno; Docker conserva `true` detrás del proxy HTTPS.
 
 Windows:
 
