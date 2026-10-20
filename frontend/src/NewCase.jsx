@@ -5,7 +5,13 @@ import { api, can } from './api'
 import { ErrorBox, Field, FormDialog, Select } from './components'
 import { CASE_PRIORITIES } from './domain'
 
-const CASE_KINDS = ['Consulta', 'Cotización', 'Solicitud', 'Reclamo', 'Seguimiento']
+const CASE_KINDS = [
+  'Consulta',
+  'Cotización',
+  { value: 'Solicitud', label: 'Orden de producción' },
+  'Reclamo',
+  'Seguimiento',
+]
 const ORIGIN_CHANNELS = ['Presencial', 'Llamada', 'Correo', 'WhatsApp', 'Otro']
 
 export default function NewCase({ onClose, clientId, client: initialClient, relatedId, user }) {
@@ -21,7 +27,7 @@ export default function NewCase({ onClose, clientId, client: initialClient, rela
 
   return (
     <FormDialog
-      title="Nuevo caso de atención"
+      title="Nueva solicitud de atención"
       onClose={onClose}
       initial={{
         client_id: clientId || '',
@@ -100,7 +106,7 @@ export default function NewCase({ onClose, clientId, client: initialClient, rela
               onChange={(event) => setValue('priority', event.target.value)}
             />
             <Field
-              label="Caso relacionado (ID opcional)"
+              label="Solicitud relacionada (ID opcional)"
               type="number"
               min="1"
               value={values.related_case_id}
@@ -115,7 +121,7 @@ export default function NewCase({ onClose, clientId, client: initialClient, rela
             </Field>
           </div>
           <p className="muted">
-            El caso entrará al pool sin asignar. Puede cerrarse sin producir ningún trabajo.
+            La solicitud entrará al pool sin asignar. Puede cerrarse sin producir ningún trabajo.
           </p>
         </>
       )}

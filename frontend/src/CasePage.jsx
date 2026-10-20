@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams, useNavigate } from 'react-router-dom'
+import { Link, useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Plus, Paperclip } from 'lucide-react'
 import { api, can, date, money, quantity, toUTC, timezone, localInput, uid } from './api'
@@ -16,12 +16,14 @@ const reason = { name: 'reason', label: 'Motivo', type: 'textarea', required: tr
 export default function CasePage({ user, print = false }) {
   const { id } = useParams(),
     nav = useNavigate(),
+    [searchParams, setSearchParams] = useSearchParams(),
+    selectedProductionId = searchParams.get('production_id') || '',
     qc = useQueryClient(),
     [modal, setModal] = useState(null),
     [section, setSection] = useState('Actividad'),
     [attentionError, setAttentionError] = useState(null),
     [attentionBusy, setAttentionBusy] = useState(false)
-  const query = useQuery({ queryKey: ['case', id], queryFn: () => api('/cases/' + id) }),
+  const query = useQuery({ queryKey: ['case', id, selectedProductionId], queryFn: () => api('/cases/' + id + (selectedProductionId ? `?production_id=${selectedProductionId}` : '')) }),
     people = useQuery({ queryKey: ['users'], queryFn: () => api('/users') })
   if (query.isPending) return <Loading />
   if (query.error) return <ErrorBox error={query.error} />
@@ -29,7 +31,7 @@ export default function CasePage({ user, print = false }) {
     p = c.production,
     users = people.data || [],
     close = () => setModal(null)
-  const attention = can(user, 'attention') && (c.owner_id === user.id || can(user, 'assign')),
+  const attention = can(user, 'attention') && (Number(c.owner_id) === Number(user.id) || can(user, 'assign')),
     canTake = can(user, 'attention') && !c.owner_id && c.lifecycle !== 'Completado',
     production = can(user, 'production'),
     finance = can(user, 'finance')
@@ -40,7 +42,7 @@ export default function CasePage({ user, print = false }) {
       method: 'POST',
       body: { version: c.version, key: uid() },
     })
-    qc.setQueryData(['case', String(c.id)], result)
+    qc.setQueryData(['case', String(c.id), selectedProductionId], result)
     await qc.invalidateQueries()
   }
   const person = (id) => users.find((u) => u.id === id)?.name || 'Sin asignar'
@@ -72,7 +74,7 @@ export default function CasePage({ user, print = false }) {
   const assign = () =>
     operation(
       'assign',
-      'Asignar caso',
+      'Asignar solicitud',
       [
         {
           name: 'owner_id',
@@ -97,7 +99,7 @@ export default function CasePage({ user, print = false }) {
           key: uid(),
         },
       })
-      qc.setQueryData(['case', String(c.id)], result)
+      qc.setQueryData(['case', String(c.id), selectedProductionId], result)
       await qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'case' })
     } catch (error) {
       setAttentionError(error)
@@ -216,7 +218,7 @@ export default function CasePage({ user, print = false }) {
         canAttend={activeAttention}
         canTake={canTake}
         canAssign={can(user, 'assign') && c.lifecycle !== 'Completado'}
-        onTake={() => operation('take', 'Tomar caso', [], {}, undefined, 'Tomar caso')}
+        onTake={() => operation('take', 'Tomar solicitud', [], {}, undefined, 'Tomar solicitud')}
         onAssign={assign}
         onConvert={() => setModal({ type: 'convert' })}
         onToggle={toggleAttention}
@@ -226,7 +228,7 @@ export default function CasePage({ user, print = false }) {
         onEdit={() =>
           operation(
             'details',
-            'Editar datos del caso',
+            'Editar datos de la solicitud',
             [
               {
                 name: 'priority',
@@ -273,7 +275,7 @@ export default function CasePage({ user, print = false }) {
             {[
               'Actividad',
               'Cotizaciones',
-              ...(p ? ['Producción', 'Entregas y cobros'] : []),
+              ...(c.production_count ? ['Producción', 'Entregas y cobros'] : []),
               'Archivos',
             ].map((s) => (
               <button
@@ -371,7 +373,7 @@ export default function CasePage({ user, print = false }) {
                           Registrar decisión
                         </button>
                       )}
-                      {activeAttention && !p && q.status === 'Aceptada' && q.currency === 'HNL' && (
+                      {activeAttention && q.status === 'Aceptada' && q.currency === 'HNL' && !q.production_id && (
                         <button
                           className="primary"
                           onClick={() => setModal({ type: 'convert', source: q })}
@@ -379,6 +381,7 @@ export default function CasePage({ user, print = false }) {
                           Generar orden con esta versión
                         </button>
                       )}
+                      {q.production_id && <Link className="button" to={`/cases/${c.id}?production_id=${q.production_id}`}>Ver {q.order_number}</Link>}
                     </div>
                   </article>
                 ))
@@ -387,6 +390,15 @@ export default function CasePage({ user, print = false }) {
                   Aún no hay cotizaciones. Puedes cotizar en lempiras sin iniciar fabricación.
                 </Empty>
               )}
+            </Panel>
+          )}
+          {section === 'Producción' && c.production_count > 0 && (
+            <Panel title={`Órdenes de producción · ${c.production_count} · ${c.production_pending_count} pendientes`} action={activeAttention && <button className="primary" onClick={() => setModal({ type: 'convert' })}><Plus size={15}/>Agregar orden de producción</button>}>
+              <div className="order-selector" role="list" aria-label="Órdenes de producción">
+                {c.productions.map((order) => <Link role="listitem" key={order.id} className={String(order.id)===String(p?.id)?'order-card active':'order-card'} to={`/cases/${c.id}?production_id=${order.id}`}>
+                  <strong>{order.order_number}</strong><span>{order.stage_label || 'Pendiente de clasificación'}</span><span>{order.delivery_status==='Completa'?'Entregada':`Entrega ${order.delivery_status}`}</span><span>{order.committed_date?`Compromiso ${date(order.committed_date)}`:'Sin fecha comprometida'}</span>
+                </Link>)}
+              </div>
             </Panel>
           )}
           {section === 'Producción' && p && (
@@ -533,7 +545,7 @@ export default function CasePage({ user, print = false }) {
           )}
           {section === 'Archivos' && (
             <Panel
-              title="Archivos del expediente"
+              title="Archivos de la solicitud"
               action={
                 (activeAttention || (production && p && c.lifecycle !== 'Completado')) && (
                   <button onClick={() => setModal({ type: 'upload' })}>
@@ -734,16 +746,16 @@ export default function CasePage({ user, print = false }) {
       {modal?.type === 'operation' && <Operation {...modal} record={c} onClose={close} />}{' '}
       {modal?.type === 'complete' && (
         <FormDialog
-          title="Completar caso"
+          title="Completar solicitud"
           initial={{}}
-          submit="Completar caso"
+          submit="Completar solicitud"
           canSubmit={completionBlockers.length === 0}
           onClose={close}
           onSave={() => changeLifecycle('complete')}
           render={() => (
             <div className="notice">
               <p>
-                El expediente dejará las bandejas activas y seguirá disponible en el historial y
+                La solicitud dejará las bandejas activas y seguirá disponible en el historial de solicitudes y
                 perfil del cliente.
               </p>
               {completionBlockers.length > 0 ? (
@@ -768,6 +780,7 @@ export default function CasePage({ user, print = false }) {
           quote={modal.type === 'quote'}
           source={modal.source}
           onClose={close}
+          onCreated={(order) => {setSearchParams({ production_id: String(order.id) });setSection('Producción')}}
         />
       )}
       {modal?.type === 'upload' && (

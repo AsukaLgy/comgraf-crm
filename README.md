@@ -1,6 +1,6 @@
 # Comgraf · Comunicación Gráfica
 
-CRM local para imprenta: un expediente desde atención hasta producción, entrega y cobranza. React/JavaScript, FastAPI, SQLAlchemy, Alembic y **MySQL real**. Interfaz en español, sin Frappe, Bench, CDN ni servicios cloud obligatorios.
+CRM local para imprenta: una solicitud desde atención hasta producción, entrega y cobranza. Dentro de cada solicitud se genera su orden de producción. React/JavaScript, FastAPI, SQLAlchemy, Alembic y **MySQL real**. Interfaz en español, sin Frappe, Bench, CDN ni servicios cloud obligatorios.
 
 ## Ejecución en este equipo Windows
 
@@ -89,16 +89,16 @@ Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vit
 ## Recorrido de trabajo
 
 1. Crear cliente provisional (basta un nombre); agregar contactos y datos comerciales cuando se conozcan.
-2. Crear caso y tomarlo desde el pool. Registrar notas internas con plantillas; resumir llamadas, visitas, acuerdos y comentarios en una sola bitacora; programar seguimientos. Cerrar atención retira el caso de acción inmediata, pero no cierra trabajo ni cobranza: «Cerrar atención retira el caso de pendientes inmediatos; el trabajo y sus cobros continúan».
-3. Preparar cotización con partidas y vigencia. Registrar aceptación/rechazo de una versión. Generar orden reutiliza esa versión y conserva el expediente.
-4. Generar orden activa el mismo expediente en Nuevo. Avanzar por Nuevo → Aprobación → Impresión → Taller → Listo para entregar. Aprobación es revisión operativa con el cliente, sin autorización interna separada.
+2. Crear una solicitud y tomarla desde el pool. Registrar notas internas con plantillas; resumir llamadas, visitas, acuerdos y comentarios en una sola bitácora; programar seguimientos. Cerrar atención retira la solicitud de acción inmediata, pero no cierra el trabajo ni la cobranza.
+3. Preparar cotización con partidas y vigencia. Registrar aceptación/rechazo de una versión. Generar una orden de producción reutiliza esa versión y conserva la solicitud.
+4. La orden recorre Nuevo → Aprobación → Impresión → Encuadernación → Listo para entregar. Aprobación es revisión operativa con el cliente, sin autorización interna separada.
 5. Programar el inicio y compromiso de entrega de forma independiente; el evento conserva fechas anteriores y nuevas, usuario y hora. El avance normal no exige motivo; bloqueos y retrocesos sí.
 6. Registrar cantidades entregadas por partida y evidencia. Una entrega parcial conserva pendientes; solo las cantidades completas muestran Entregado y detienen el tiempo activo.
 7. Registrar anticipos/abonos; corregir mediante reversión o ajuste autorizado. La entrega permite, con permiso financiero, incluir un abono en la misma operación o liquidar el saldo mostrado; entregar nunca crea un pago. Los saldos siguen visibles con atención cerrada.
 
 Si se anula un trabajo, el usuario registra el motivo y elige **Sin cargo** o un **importe final acordado** (total definitivo del trabajo, no cargo adicional). El ajuste conserva obligación y pagos anteriores. Si el total pagado supera el importe final, queda saldo a favor; una devolución requiere que un usuario con permiso financiero confirme fecha/importe/referencia después de realizarla. Una persona que puede detener producción pero no ajustar cobros deja la resolución en la bandeja **Resolución de anulación**. Las órdenes históricas anuladas también requieren revisión explícita.
 
-Correo/WhatsApp muestran **No configurado**. Se guardan borradores y se registran interacciones manuales; no hay envíos simulados. Los borradores se guardan por caso/canal/usuario en MySQL; el navegador conserva un respaldo provisional durante la escritura. Los expedientes y saldos nunca dependen de localStorage.
+Correo/WhatsApp muestran **No configurado**. Se guardan borradores y se registran interacciones manuales; no hay envíos simulados. Los borradores se guardan por solicitud/canal/usuario en MySQL; el navegador conserva un respaldo provisional durante la escritura. Las solicitudes y sus saldos nunca dependen de localStorage.
 
 ## Actualización
 
@@ -175,6 +175,22 @@ npm.cmd run test:e2e
 
 Linux: sustituir rutas de `.venv\Scripts\python.exe` por `.venv/bin/python` y usar `MYSQL_DATABASE=comgraf_test UPLOAD_DIR=../.runtime/test-uploads` antes del comando uvicorn. Las credenciales E2E son aleatorias, locales, temporales y se guardan en `.runtime/e2e.json`, excluido de Git. Ejecuta pruebas backend antes del sembrado E2E, porque las pruebas backend limpian esa base.
 
+## Regularización controlada de solicitudes históricas
+
+Después de actualizar la aplicación, primero genera la vista previa:
+
+```sh
+docker compose exec app python -m app.cli completions-preview
+```
+
+La lista incluye únicamente solicitudes activas con atención abierta, orden entregada por completo, obligación y saldo neto verificables, y sin tareas, mensajes, bloqueos ni resoluciones económicas pendientes. Revisa cada número y cliente antes de ejecutar:
+
+```sh
+docker compose exec app python -m app.cli regularize-completions --confirm REGULARIZAR-COMPLETADAS
+```
+
+El comando vuelve a comprobar la elegibilidad dentro de la transacción, registra una finalización con fecha actual y el origen `historical_regularization`, y no cambia entregas, movimientos, propietario ni fechas históricas. Repetirlo no duplica eventos. No hay migración de base de datos.
+
 ## Documentación y límites
 
 - [Arquitectura, permisos, cálculos y denominadores](docs/ARQUITECTURA.md).
@@ -190,6 +206,8 @@ Las nuevas operaciones se registran en HNL. Los importes históricos en USD se c
 
 Las migraciones 003/004 incorporan el flujo de atención y producción descrito en [ARQUITECTURA](docs/ARQUITECTURA.md) y vuelven a abrir atenciones que ya tenían seguimientos vencidos. Antes de actualizar, respalda la base y adjuntos; aplica con `alembic upgrade head` (Compose lo hace al arrancar). Preparación y Listo para entregar se clasifican inequívocamente en Nuevo y Listo. Etapas intermedias ambiguas conservan el original en `legacy_stage`, quedan pendientes de clasificación manual y no reciben tiempos históricos inventados. Las migraciones no eliminan expedientes, entregas ni pagos. Sus downgrades se rechazan porque restaurar estados anteriores exigiría adivinar: para volver atrás restaura conjuntamente el respaldo de base y archivos.
 
+La migración 008 convierte la relación de órdenes a solicitudes en uno-a-varios y añade el vínculo explícito de partidas, movimientos y seguimientos a la orden. Conserva la clave histórica como ID de OP y no reasigna etapas ni movimientos. Respalda base y adjuntos antes de actualizar; Compose aplica `alembic upgrade head` al iniciar. Verifica `/api/health`, una solicitud histórica y una orden nueva antes de habilitar el uso normal. El downgrade se rechaza porque volver a una sola orden por solicitud descartaría las órdenes agregadas.
+
 Los trabajos que llegan a Listo para entregar reciben un seguimiento de recogida a siete dias. Al registrar el contacto puede programarse otro recordatorio semanal; una entrega parcial lo conserva y una entrega completa resuelve solo ese seguimiento. Sin anticipo, con anticipo y pagado se distinguen por los movimientos reales.
 
-Cerrar atencion no completa el expediente. Completar caso es manual y solo se habilita cuando se resuelven entregas, cargos, devoluciones, tareas y comunicaciones pendientes; el expediente completo permanece en Historial y en el perfil del cliente. Reactivar conserva todos los movimientos y etapas. Las llamadas o visitas se resumen como notas internas; las entradas historicas siguen en la bitacora. Las plantillas solo aceleran la escritura y no crean tareas, pagos, entregas ni aprobaciones.
+Cerrar atención no completa la solicitud. Las consultas y cotizaciones sin producción se completan manualmente. Una solicitud con producción se completa al resolver la entrega, el saldo y las demás gestiones pendientes; después sigue disponible en el Historial y en el perfil del cliente. Reactivarla conserva todos los movimientos y etapas. Las llamadas o visitas se resumen como notas internas; las entradas históricas siguen en la bitácora. Las plantillas solo aceleran la escritura y no crean tareas, pagos, entregas ni aprobaciones.

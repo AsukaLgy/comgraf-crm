@@ -111,6 +111,7 @@ class Task(Base):
     __tablename__ = 'tasks'
     id = Column(Integer, primary_key=True)
     case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
+    production_id = Column(ForeignKey('productions.id'), index=True)
     owner_id = Column(ForeignKey('users.id'))
     category = Column(String(20), nullable=False, default='GENERAL', server_default='GENERAL')
     title = Column(String(500), nullable=False)
@@ -137,7 +138,9 @@ class Quote(Base):
 
 class Production(Base):
     __tablename__ = 'productions'
-    case_id = Column(ForeignKey('cases.id'), primary_key=True)
+    id = Column(Integer, primary_key=True)
+    case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
+    created_by_id = Column(ForeignKey('users.id'))
     quote_id = Column(ForeignKey('quotes.id'), unique=True)
     # Legacy assignment column; current ownership is the case's principal owner.
     owner_id = Column(ForeignKey('users.id'))
@@ -178,7 +181,8 @@ class Production(Base):
 class Item(Base):
     __tablename__ = 'items'
     id = Column(Integer, primary_key=True)
-    case_id = Column(ForeignKey('productions.case_id'), nullable=False, index=True)
+    case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
+    production_id = Column(ForeignKey('productions.id'), nullable=False, index=True)
     product = Column(String(80), nullable=False)
     quantity = Column(Numeric(14, 3), nullable=False)
     unit = Column(String(30), nullable=False)
@@ -220,6 +224,7 @@ class Ledger(Base):
     __tablename__ = 'ledger'
     id = Column(Integer, primary_key=True)
     case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
+    production_id = Column(ForeignKey('productions.id'), index=True)
     kind = Column(String(30), nullable=False)
     amount = Column(Numeric(14, 2), nullable=False)
     currency = Column(String(3), nullable=False)

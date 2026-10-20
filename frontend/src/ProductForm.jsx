@@ -1,8 +1,8 @@
-import {useRef} from 'react'
+import {useRef, useState} from 'react'
 import {useQueryClient} from '@tanstack/react-query'
 import {Plus, Trash2} from 'lucide-react'
 import {api, uid, localDate, money} from './api'
-import {FormDialog, Field, Select, Badge} from './components'
+import {FormDialog, Field, Select, Badge, ErrorBox} from './components'
 import {PRODUCT, PRODUCTS, PAYMENT_TERMS, HNL_CURRENCY} from './domain'
 
 export const newItem=()=>({product:PRODUCT.BUSINESS_CARDS,quantity:'100',unit:'unidades',unit_price:'0',specs:{measure_unit:'cm'}})
@@ -18,20 +18,23 @@ export function ItemsEditor({items,onChange}){
   })}<button type="button" onClick={()=>onChange([...items,newItem()])}><Plus size={15}/>Agregar producto</button></div>
 }
 function cleanItems(items){return items.map(item=>({...item,specs:Object.fromEntries(Object.entries(item.specs).filter(([,v])=>v!==''&&v!==null).map(([k,v])=>[k,['copies','sheets'].includes(k)?Number(v):v]))}))}
-export default function ProductForm({record, quote=false, source=null, onClose}){
-  const qc=useQueryClient(),key=useRef(uid()),signature=useRef('')
-  const accepted=record.quotes.filter(q=>q.status==='Aceptada'&&q.currency===HNL_CURRENCY)
+export default function ProductForm({record, quote=false, source=null, onClose, onCreated}){
+  const qc=useQueryClient(),key=useRef(uid()),signature=useRef(''),[created,setCreated]=useState(null),[createdVersion,setCreatedVersion]=useState(record.version),[advanceError,setAdvanceError]=useState(null),[advancing,setAdvancing]=useState(false)
+  const accepted=record.quotes.filter(q=>q.status==='Aceptada'&&q.currency===HNL_CURRENCY&&!q.production_id)
   const oldUsd=!!source&&source.currency!==HNL_CURRENCY
   const initial={items:source?.items ? source.items.map(i=>oldUsd?{...i,unit_price:''}:i) : [newItem()],quote_id:!quote&&source?.id&&!oldUsd?String(source.id):'',currency:HNL_CURRENCY,valid_until:localDate(),requested_date:'',committed_date:'',payment_terms:PAYMENT_TERMS[0],advance_required:'0',payment_due_date:localDate(),delivery_method:'Retiro en taller',instructions:''}
   async function save(values){
     let body=quote?{items:cleanItems(values.items),currency:HNL_CURRENCY,valid_until:values.valid_until}:{...values,currency:HNL_CURRENCY,quote_id:values.quote_id?Number(values.quote_id):null,requested_date:values.requested_date||null,committed_date:values.committed_date||null,items:values.quote_id?[]:cleanItems(values.items)}
     if(!quote)delete body.valid_until
     const next=JSON.stringify(body);if(signature.current&&signature.current!==next)key.current=uid();signature.current=next
-    try{const result=await api(`/cases/${record.id}/${quote?'quotes':'convert'}`,{method:'POST',body:{...body,version:record.version,key:key.current}});qc.setQueryData(['case',String(record.id)],result);await qc.invalidateQueries({predicate:q=>q.queryKey[0]!=='case'})}
+    try{const result=await api(`/cases/${record.id}/${quote?'quotes':'convert'}`,{method:'POST',body:{...body,version:record.version,key:key.current}});qc.setQueryData(['case',String(record.id),String(result.production?.id||'')],result);await qc.invalidateQueries({predicate:q=>q.queryKey[0]!=='case'});if(!quote){setCreated(result.production);setCreatedVersion(result.version);onCreated?.(result.production);setAdvanceError(null);return false}}
     catch(error){if(error.status===409)await qc.invalidateQueries({queryKey:['case',String(record.id)]});throw error}
   }
-  return <FormDialog wide title={quote?'Preparar nueva versión de cotización':'Generar orden de producción'} initial={initial} onClose={onClose} onSave={save} submit={quote?'Guardar cotización':'Generar orden de producción'} render={(v,set)=><>
-    <div className="notice">{quote?'Cotizar no inicia fabricación. Cada versión conserva sus partidas e importes en lempiras.':'Este caso se ampliará en el mismo expediente y la orden quedará activa en la etapa Nuevo.'}</div>
+  async function advance(){if(!created)return;setAdvancing(true);setAdvanceError(null);try{const result=await api(`/cases/${record.id}/production/stage`,{method:'POST',body:{production_id:created.id,stage:'PRINTING',reason:'',version:createdVersion,key:uid()}});qc.setQueryData(['case',String(record.id),String(created.id)],result);await qc.invalidateQueries({predicate:q=>q.queryKey[0]!=='case'});onClose()}catch(error){setAdvanceError(error)}finally{setAdvancing(false)}}
+  return <FormDialog wide title={quote?'Preparar nueva versión de cotización':'Generar orden de producción'} initial={initial} onClose={onClose} onSave={save} submit={quote?'Guardar cotización':'Generar orden de producción'} afterSave={()=> <div className="dialog-body">
+    <div className="notice"><strong>Orden creada en Aprobación.</strong><p>¿Querés pasarla a Impresión ahora?</p><small>Elegí Impresión si el trabajo ya está aprobado y va a comenzar a imprimirse.</small></div><p>{created?.order_number||`OP-${String(created?.id||'').padStart(5,'0')}`} queda guardada en la solicitud.</p><ErrorBox error={advanceError}/><div className="actions"><button type="button" onClick={onClose}>Mantener en Aprobación</button><button type="button" className="primary" disabled={advancing} onClick={advance}>{advancing?'Actualizando…':'Pasar a Impresión'}</button></div>
+  </div>} render={(v,set)=><>
+    <div className="notice">{quote?'Cotizar no inicia fabricación. Cada versión conserva sus partidas e importes en lempiras.':'Esta orden se agregará a la solicitud en la etapa Aprobación. Agregá todos los productos que compartirán etapa y programación.'}</div>
     {oldUsd&&<div className="notice">La cotización seleccionada conserva precios históricos en dólares. Revisa y captura precios nuevos en lempiras; no se aplicó conversión cambiaria.</div>}
     {!quote&&accepted.length>0&&<Select label="Reutilizar cotización aceptada en HNL" empty="Especificar productos manualmente" options={accepted.map(q=>({value:String(q.id),label:`Versión ${q.version} · ${money(q.total,'HNL')}`}))} value={v.quote_id} onChange={e=>{const q=accepted.find(x=>String(x.id)===e.target.value);set('quote_id',e.target.value);if(q)set('items',q.items)}}/>}
     {v.quote_id&&!quote?<div className="notice">Se reutilizarán las partidas y precios de la versión aceptada. <Badge>{v.items.length} productos</Badge></div>:<ItemsEditor items={v.items} onChange={items=>set('items',items)}/>}

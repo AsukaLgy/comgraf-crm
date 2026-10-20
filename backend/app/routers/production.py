@@ -16,65 +16,65 @@ router = APIRouter(prefix='/api', tags=['Producción y cobranza'])
 
 @router.post('/cases/{case_id}/production/stage')
 def stage(case_id: int, data: s.StageInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.change_stage(db, user, case_id, data))
+    return case_response(db, user, service.change_stage(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/production/block')
 def block(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.block(db, user, case_id, data))
+    return case_response(db, user, service.block(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/production/unblock')
 def unblock(case_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.block(db, user, case_id, data, True))
+    return case_response(db, user, service.block(db, user, case_id, data, True), data.production_id)
 
 
 @router.post('/cases/{case_id}/production/schedule')
 def schedule(case_id: int, data: s.ScheduleInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.schedule(db, user, case_id, data))
+    return case_response(db, user, service.schedule(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/production/cancel')
 def cancel(case_id: int, data: s.CancellationInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.cancel(db, user, case_id, data))
+    return case_response(db, user, service.cancel(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/production/cancel/resolve')
 def resolve_cancellation(case_id: int, data: s.CancellationInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.resolve_cancellation_request(db, user, case_id, data))
+    return case_response(db, user, service.resolve_cancellation_request(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/production/refunds')
 def refund(case_id: int, data: s.RefundInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.refund(db, user, case_id, data))
+    return case_response(db, user, service.refund(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/deliveries')
 def deliver(case_id: int, data: s.DeliveryWithPaymentInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.deliver(db, user, case_id, data))
+    return case_response(db, user, service.deliver(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/payments')
 def pay(case_id: int, data: s.PaymentInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.pay(db, user, case_id, data))
+    return case_response(db, user, service.pay(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/adjustments')
 def adjust(case_id: int, data: s.AdjustmentInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.adjust(db, user, case_id, data))
+    return case_response(db, user, service.adjust(db, user, case_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/payments/{entry_id}/reverse')
 def reverse(case_id: int, entry_id: int, data: s.ReasonInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.reverse_payment(db, user, case_id, entry_id, data))
+    return case_response(db, user, service.reverse_payment(db, user, case_id, entry_id, data), data.production_id)
 
 
 @router.post('/cases/{case_id}/attachments', status_code=201)
 def upload(case_id: int, file: UploadFile = File(...), art_version: str = Form(''), user=Depends(current_user), db=Depends(get_db, scope='function')):
     case = get_case(db, user, case_id, lock=True)
-    if case.lifecycle == 'Completado': raise HTTPException(409, 'Reactiva el caso antes de adjuntar archivos nuevos')
+    if case.lifecycle == 'Completado': raise HTTPException(409, 'Reactiva la solicitud antes de adjuntar archivos nuevos')
     if not (can(db, user, 'production') and case.mode == 'Producción') and not (can(db, user, 'attention') and (case.owner_id == user.id or can(db, user, 'assign'))):
-        raise HTTPException(403, 'No tienes permiso para adjuntar archivos a este caso')
+        raise HTTPException(403, 'No tienes permiso para adjuntar archivos a esta solicitud')
     if len(art_version) > 100: raise HTTPException(422, 'Versión demasiado larga')
     filename = Path((file.filename or '').replace('\\', '/')).name[:240]
     ext = Path(filename).suffix.lower()

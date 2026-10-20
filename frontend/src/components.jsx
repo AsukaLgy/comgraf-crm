@@ -8,9 +8,9 @@ export function Badge({ children, tone = '' }) {
 }
 export function ErrorBox({ error }) {
   const guidance = {
-    VERSION_CONFLICT: 'Actualiza el expediente y revisa los datos antes de volver a guardar.',
-    SAME_STAGE: 'La etapa ya cambió. Actualiza el expediente para ver las acciones disponibles.',
-    INVALID_TRANSITION: 'Elige la etapa siguiente o usa Retroceder con un motivo.',
+    VERSION_CONFLICT: 'Actualiza la solicitud y revisa los datos antes de volver a guardar.',
+    SAME_STAGE: 'La etapa ya cambió. Actualiza la solicitud para ver las acciones disponibles.',
+    INVALID_TRANSITION: 'Elige la etapa siguiente o registra un reclamo con motivo.',
     OVERDUE_FOLLOWUP: 'Completa o reprograma el seguimiento vencido y vuelve a intentar.',
     PRODUCTION_BLOCKED: 'Resuelve el bloqueo de producción antes de avanzar.',
     PERMISSION_DENIED: 'Tu rol no tiene permiso para esta operación.',
@@ -124,10 +124,12 @@ export function FormDialog({
   wide,
   submit = 'Guardar',
   canSubmit = true,
+  afterSave,
 }) {
   const [values, setValues] = useState(initial),
     [error, setError] = useState(null),
-    [busy, setBusy] = useState(false)
+    [busy, setBusy] = useState(false),
+    [saved, setSaved] = useState(false)
   const locked = useRef(false)
   const change = (key, value) => {
     setValues((v) => ({ ...v, [key]: value }))
@@ -140,8 +142,9 @@ export function FormDialog({
     setBusy(true)
     setError(null)
     try {
-      await onSave(values)
-      onClose()
+      const closeAfter = await onSave(values)
+      if (closeAfter === false) setSaved(true)
+      else onClose()
     } catch (err) {
       setError(err)
     } finally {
@@ -151,7 +154,7 @@ export function FormDialog({
   }
   return (
     <Modal title={title} onClose={onClose} wide={wide} busy={busy}>
-      <form onSubmit={save}>
+      {saved && afterSave ? afterSave() : <form onSubmit={save}>
         <div className="dialog-body">
           {render(values, change)}
           <ErrorBox error={error} />
@@ -164,7 +167,7 @@ export function FormDialog({
             {busy ? 'Guardando…' : submit}
           </button>
         </footer>
-      </form>
+      </form>}
     </Modal>
   )
 }
@@ -193,12 +196,14 @@ export function Operation({
     if (lastPayload.current !== null && signature !== lastPayload.current) key.current = uid()
     lastPayload.current = signature
     try {
-      const result = await api(`/cases/${record.id}/${path}`, {
+      await api(`/cases/${record.id}/${path}`, {
         method,
-        body: { ...body, version: record.version, key: key.current },
+        body: { ...body, ...(record.production?.id ? { production_id: record.production.id } : {}), version: record.version, key: key.current },
       })
-      qc.setQueryData(['case', String(record.id)], result)
-      await qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'case' })
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['case', String(record.id)] }),
+        qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'case' }),
+      ])
     } catch (error) {
       if (error.status === 409)
         await qc.invalidateQueries({ queryKey: ['case', String(record.id)] })

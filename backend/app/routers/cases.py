@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from ..db import get_db
-from ..models import Case, Client, Contact, Draft, SavedView
+from ..models import Case, Client, Contact, Draft, Production, SavedView
 from .. import schemas as s, services as service
 from ..security import current_user, require
-from ..repository import row, get_case, case_detail, cases_list, case_counts
+from ..repository import row, get_case, case_detail, cases_list, case_counts, orders_list
 from .common import case_response
 
 router = APIRouter(prefix='/api', tags=['Expedientes'])
@@ -20,6 +20,11 @@ def counts(user=Depends(current_user), db=Depends(get_db, scope='function')):
     return case_counts(db, user)
 
 
+@router.get('/orders')
+def list_orders(request: Request, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return orders_list(db, user, dict(request.query_params))
+
+
 @router.post('/cases', status_code=201)
 def create(data: s.CaseInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'attention')
@@ -31,13 +36,13 @@ def create(data: s.CaseInput, user=Depends(current_user), db=Depends(get_db, sco
     case = Case(**data.model_dump())
     db.add(case)
     db.flush()
-    service.event(db, case, user, f'Caso de {case.kind.lower()} creado por {case.channel}', data={'action': 'created'})
+    service.event(db, case, user, f'Solicitud de {case.kind.lower()} creada por {case.channel}', data={'action': 'created'})
     return case_response(db, user, case)
 
 
 @router.get('/cases/{case_id}')
-def detail(case_id: int, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_detail(db, user, get_case(db, user, case_id))
+def detail(case_id: int, production_id: int | None = None, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    return case_detail(db, user, get_case(db, user, case_id), production_id)
 
 
 @router.post('/cases/{case_id}/take')
@@ -102,12 +107,32 @@ def decision(case_id: int, quote_id: int, data: s.QuoteDecision, user=Depends(cu
 
 @router.post('/cases/{case_id}/convert')
 def convert(case_id: int, data: s.Conversion, user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return case_response(db, user, service.convert(db, user, case_id, data))
+    case = service.convert(db, user, case_id, data)
+    production_id = db.scalar(select(Production.id).where(Production.case_id == case.id).order_by(Production.id.desc()).limit(1))
+    return case_response(db, user, case, production_id)
 
 
 @router.get('/views')
 def views(user=Depends(current_user), db=Depends(get_db, scope='function')):
-    return [row(v) for v in db.scalars(select(SavedView).where(SavedView.user_id == user.id))]
+    result = []
+    for saved in db.scalars(select(SavedView).where(SavedView.user_id == user.id)):
+        value = row(saved)
+        value['filters'] = normalized_saved_filters(value['filters'])
+        result.append(value)
+    return result
+
+
+def normalized_saved_filters(filters):
+    filters = dict(filters or {})
+    view = filters.get('view')
+    if view == 'pool':
+        return {key: value for key, value in filters.items() if key in ('view', 'sort', 'page')}
+    if view in ('action', 'mine-action'):
+        filters.pop('status', None)
+        filters.pop('lifecycle', None)
+    elif view == 'mine':
+        filters.pop('lifecycle', None)
+    return filters
 
 
 @router.post('/views')
@@ -118,7 +143,8 @@ def save_view(data: s.ViewInput, user=Depends(current_user), db=Depends(get_db, 
     if not view:
         view = SavedView(user_id=user.id, name=data.name)
         db.add(view)
-    view.filters = data.filters
+    filters = normalized_saved_filters(data.filters)
+    view.filters = filters
     db.flush()
     return row(view)
 
@@ -127,7 +153,7 @@ def save_view(data: s.ViewInput, user=Depends(current_user), db=Depends(get_db, 
 def draft(case_id: int, channel: str, data: s.DraftInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'attention')
     case = get_case(db, user, case_id, lock=True)
-    if case.lifecycle == 'Completado': raise HTTPException(409, 'Reactiva el caso antes de guardar borradores nuevos')
+    if case.lifecycle == 'Completado': raise HTTPException(409, 'Reactiva la solicitud antes de guardar borradores nuevos')
     if channel not in ('Nota', 'Llamada', 'Visita', 'Correo', 'WhatsApp'): raise HTTPException(422, 'Canal no reconocido')
     draft = db.scalar(select(Draft).where(Draft.case_id == case_id, Draft.user_id == user.id, Draft.channel == channel))
     if draft and draft.version != data.version: raise HTTPException(409, 'El borrador cambió en otra sesión')

@@ -12,7 +12,7 @@ STAGE_LABELS = {
     'NEW': 'Nuevo',
     'APPROVAL': 'Aprobación',
     'PRINTING': 'Impresión',
-    'WORKSHOP': 'Taller',
+    'WORKSHOP': 'Encuadernación',
     'READY': 'Listo para entregar',
 }
 NEXT_STAGE = {'NEW': 'APPROVAL', 'APPROVAL': 'PRINTING', 'PRINTING': 'WORKSHOP', 'WORKSHOP': 'READY'}
@@ -87,6 +87,7 @@ class CaseInput(Input):
 class Mutation(Input):
     version: int = Field(ge=1)
     key: str = Field(min_length=16, max_length=80)
+    production_id: int | None = Field(default=None, ge=1)
 
 
 # ---- Atención, comunicación y tareas ----

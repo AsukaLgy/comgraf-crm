@@ -3,18 +3,22 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, can, date, money, uid } from './api'
 import { Badge, Empty, ErrorBox } from './components'
-import { PRODUCTION_STAGE_LABELS } from './domain'
 
 // Shared read-only row projection for operational pools and customer history.
 export default function CaseTable({ items, remember, user }) {
   if (!items.length) return <Empty />
 
   return (
-    <div className="table-wrap">
+    <div
+      className={`table-wrap${remember ? ' inbox-list-scroll' : ''}`}
+      tabIndex={remember ? 0 : undefined}
+      role={remember ? 'region' : undefined}
+      aria-label={remember ? 'Lista desplazable de solicitudes' : undefined}
+    >
       <table className="case-table">
         <thead>
           <tr>
-            <th>Expediente / asunto</th>
+            <th>Solicitud / asunto</th>
             <th>Cliente</th>
             <th>Responsable</th>
             <th>Atención</th>
@@ -46,23 +50,16 @@ export default function CaseTable({ items, remember, user }) {
                 <Badge>{record.status}</Badge>
               </td>
               <td>
-                {record.production ? (
-                  <>
-                    <Badge tone={productionTone(record.production)}>
-                      {productionLabel(record.production)}
-                    </Badge>
-                    <small>Entrega {record.delivery_status.toLowerCase()}</small>
-                    {record.production.stage === 'READY' &&
-                      record.delivery_status !== 'Completa' && (
-                        <small>{record.production.ready_days || 0} días sin recoger</small>
-                      )}
-                  </>
-                ) : (
+                {record.productions?.length ? record.productions.map((order) => <div className="order-table-row" key={order.id}>
+                  <Link to={`/cases/${record.id}?production_id=${order.id}`} onClick={remember}>{order.order_number}</Link>
+                  <Badge tone={order.cancelled_at?'red':order.blocked_since?'amber':order.delivery_status==='Completa'?'teal':order.stage==='READY'?'amber':''}>{order.cancelled_at?'Anulada':order.blocked_since?'Bloqueada':order.delivery_status==='Completa'?'Entregada':order.stage_label}</Badge>
+                  <small>Entrega {order.delivery_status.toLowerCase()}</small>
+                </div>) : (
                   <span className="muted">Atención</span>
                 )}
               </td>
               <td>
-                {record.production?.committed_date ? date(record.production.committed_date) : '—'}
+                {record.productions?.length ? record.productions.filter(o=>o.committed_date).map(o=><small className="order-date" key={o.id}><Link to={`/cases/${record.id}?production_id=${o.id}`} onClick={remember}>{o.order_number}</Link> · {date(o.committed_date)}</small>) : '—'}
                 <small>{record.next_action}</small>
               </td>
               <td>
@@ -71,7 +68,7 @@ export default function CaseTable({ items, remember, user }) {
               <td>
                 {record.balance === undefined
                   ? '—'
-                  : money(record.balance, record.production?.currency)}
+                  : record.balance === null ? 'Saldo por moneda' : money(record.balance, record.production?.currency)}
                 {record.production?.cancellation_review_pending && (
                   <small className="text-red">Resolución de anulación pendiente</small>
                 )}
@@ -108,10 +105,17 @@ function TakeCaseButton({ record }) {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['cases'] }),
         qc.invalidateQueries({ queryKey: ['counts'] }),
+        qc.invalidateQueries({ queryKey: ['personal-counts'] }),
       ])
     } catch (cause) {
       setError(cause)
-      if (cause.status === 409) await qc.invalidateQueries({ queryKey: ['cases'] })
+      if (cause.status === 409) {
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ['cases'] }),
+          qc.invalidateQueries({ queryKey: ['counts'] }),
+          qc.invalidateQueries({ queryKey: ['personal-counts'] }),
+        ])
+      }
     } finally {
       setBusy(false)
     }
@@ -119,27 +123,10 @@ function TakeCaseButton({ record }) {
   return (
     <span className="case-row-take">
       <button onClick={take} disabled={busy}>
-        {busy ? 'Tomando…' : 'Tomar caso'}
+        {busy ? 'Tomando…' : 'Tomar solicitud'}
       </button>
       {error && <ErrorBox error={error} />}
     </span>
-  )
-}
-
-function productionTone(production) {
-  if (production.cancelled_at) return 'red'
-  if (production.blocked_since) return 'amber'
-  return 'teal'
-}
-
-function productionLabel(production) {
-  if (production.cancelled_at) return 'Cancelado'
-  if (production.blocked_since) return 'Bloqueado'
-  if (production.result_label) return production.result_label
-  return (
-    production.stage_label ||
-    PRODUCTION_STAGE_LABELS[production.stage] ||
-    'Pendiente de clasificación'
   )
 }
 

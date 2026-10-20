@@ -8,13 +8,22 @@ import {
   PRODUCTION_NEXT_STAGE,
 } from './domain'
 
-const reason = { name: 'reason', label: 'Motivo del retroceso', type: 'textarea', required: true }
+const reason = { name: 'reason', label: 'Motivo del reclamo', type: 'textarea', required: true }
 
 export default function ProductionStages({ record, canManage, onSchedule, onDelivery, operation }) {
   const production = record.production
   const currentIndex = PRODUCTION_STAGES.indexOf(production.stage)
   const next = PRODUCTION_NEXT_STAGE[production.stage]
   const previous = currentIndex > 0 ? PRODUCTION_STAGES.slice(0, currentIndex) : []
+  const visited = new Set([production.stage])
+  for (const event of record.events || []) {
+    if (event.data?.production_id !== production.id && !(record.production_count === 1 && !event.data?.production_id)) continue
+    if (event.data?.action === 'converted' && event.data.stage) visited.add(event.data.stage)
+    if (event.data?.action === 'stage' || event.data?.action === 'stage_classified') {
+      if (event.data.from) visited.add(event.data.from)
+      if (event.data.to || event.data.stage) visited.add(event.data.to || event.data.stage)
+    }
+  }
 
   function classify() {
     operation(
@@ -44,13 +53,13 @@ export default function ProductionStages({ record, canManage, onSchedule, onDeli
             className={
               stage === production.stage
                 ? 'current'
-                : currentIndex >= 0 && index < currentIndex
+                : visited.has(stage)
                   ? 'done'
                   : ''
             }
           >
             <span>
-              {currentIndex >= 0 && index < currentIndex ? <Check size={13} /> : index + 1}
+              {visited.has(stage) && stage !== production.stage ? <Check size={13} /> : index + 1}
             </span>
             {PRODUCTION_STAGE_LABELS[stage]}
           </li>
@@ -129,7 +138,7 @@ export default function ProductionStages({ record, canManage, onSchedule, onDeli
                         onClick={() =>
                           operation(
                             'production/stage',
-                            'Retroceder etapa',
+                            'Registrar reclamo',
                             [
                               {
                                 name: 'stage',
@@ -143,10 +152,12 @@ export default function ProductionStages({ record, canManage, onSchedule, onDeli
                               reason,
                             ],
                             { stage: previous.at(-1) },
+                            undefined,
+                            'Registrar reclamo',
                           )
                         }
                       >
-                        Retroceder
+                        Registrar reclamo
                       </button>
                     )}
                   </>
@@ -175,7 +186,7 @@ export default function ProductionStages({ record, canManage, onSchedule, onDeli
                         onClick={() =>
                           operation(
                             'production/stage',
-                            'Retroceder etapa',
+                            'Registrar reclamo',
                             [
                               {
                                 name: 'stage',
@@ -189,10 +200,12 @@ export default function ProductionStages({ record, canManage, onSchedule, onDeli
                               reason,
                             ],
                             { stage: previous.at(-1) },
+                            undefined,
+                            'Registrar reclamo',
                           )
                         }
                       >
-                        Retroceder
+                        Registrar reclamo
                       </button>
                     )}
                   </>

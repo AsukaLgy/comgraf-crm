@@ -11,8 +11,8 @@ export default function CaseActivity({ record, attention, user, person, onRefere
         <Composer key={record.id} record={record} user={user} />
       ) : (
         <div className="notice">
-          Etapa actual: {record.production?.stage_label || 'sin producción'}. Las especificaciones y
-          conversaciones se conservan en este expediente.
+          {record.production_count ? `${record.production_count} órdenes de producción en esta solicitud. ` : 'Sin órdenes de producción. '}
+          Las especificaciones y conversaciones se conservan en el expediente.
         </div>
       )}
       {record.events.length ? (
@@ -29,10 +29,13 @@ export default function CaseActivity({ record, attention, user, person, onRefere
                   <span>{person(event.actor_id)}</span>
                   <time>{date(event.created_at)}</time>
                 </div>
-                <p>{event.body}</p>
+                <p>{event.data?.action === 'stage' ? event.body.replace('Taller', 'Encuadernación') : event.body}</p>
+                {(event.data?.production_id || event.data?.order_id) && event.data?.action !== 'converted' && (
+                  <p className="event-references"><Link to={`/cases/${record.id}?production_id=${event.data.production_id || event.data.order_id}`}>{event.data.order_number || `OP-${String(event.data.production_id || event.data.order_id).padStart(5,'0')}`}</Link></p>
+                )}
                 {event.data?.action === 'converted' && (
                   <p className="event-references">
-                    <Link to="#production" onClick={() => onReference?.('production')}>
+                    <Link to={`/cases/${record.id}?production_id=${event.data.production_id || event.data.order_id}`} onClick={() => onReference?.('production')}>
                       Orden {event.data.order_number || `OP-${String(record.id).padStart(5, '0')}`}
                     </Link>
                     {event.data.quote_id &&

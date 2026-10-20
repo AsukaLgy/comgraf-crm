@@ -29,13 +29,14 @@ async function createCase(page, subject) {
   expect(response.ok()).toBeTruthy()
   const record = await response.json()
   await page.goto('/cases/' + record.id)
-  await page.getByRole('button', { name: 'Tomar caso', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Tomar caso', exact: true }).click()
+  await page.getByRole('button', { name: 'Tomar solicitud', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Tomar solicitud', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   return record
 }
 
 test('tomar un caso sin asignar desde la bandeja actualiza la fila', async ({ page }) => {
+  const subject = 'E2E caso para tomar desde bandeja ' + Date.now()
   const clientResponse = await page.request.post('/api/clients', {
     headers,
     data: { name: 'E2E · Pool ' + Date.now() },
@@ -44,14 +45,38 @@ test('tomar un caso sin asignar desde la bandeja actualiza la fila', async ({ pa
   const client = await clientResponse.json()
   const response = await page.request.post('/api/cases', {
     headers,
-    data: { client_id: client.id, subject: 'E2E caso para tomar desde bandeja' },
+    data: { client_id: client.id, subject },
   })
   expect(response.ok()).toBeTruthy()
   await page.goto('/inbox/pool')
-  const row = page.getByRole('row').filter({ hasText: 'E2E caso para tomar desde bandeja' })
-  await row.getByRole('button', { name: 'Tomar caso' }).click()
+  await expect(page.getByRole('button', { name: 'Filtros', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Guardar vista', exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Estado', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Modo', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Orden', { exact: true })).toBeVisible()
+  const row = page.getByRole('row').filter({ hasText: subject })
+  await row.getByRole('button', { name: 'Tomar solicitud' }).click()
   await expect(row).toHaveCount(0)
-  await expect(page.getByRole('link', { name: /Mis casos/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Mis solicitudes/ })).toBeVisible()
+  await page.getByRole('link', { name: /Mis solicitudes/ }).click()
+  const mineRow = page.getByRole('row').filter({ hasText: subject })
+  await expect(mineRow).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('row').filter({ hasText: subject })).toBeVisible()
+})
+
+test('búsqueda global funciona con el botón y con Enter', async ({ page }) => {
+  await page.goto('/')
+  const search = page.getByRole('textbox', { name: 'Búsqueda global' })
+  await search.fill('noexiste-button-' + Date.now())
+  await page.getByRole('button', { name: 'Buscar', exact: true }).click()
+  await expect(page).toHaveURL(/\/search\?q=/)
+  await expect(page.getByRole('heading', { name: 'Búsqueda global' })).toBeVisible()
+
+  await search.fill('noexiste-enter-' + Date.now())
+  await search.press('Enter')
+  await expect(page).toHaveURL(/noexiste-enter-/)
+  await expect(page.getByText(/Resultados para/)).toBeVisible()
 })
 
 test('anular con importe final calcula devolución y registra devolución real', async ({ page }) => {
@@ -128,15 +153,15 @@ test('manual consultation can be closed and explicitly completed', async ({ page
     page.getByText('Consultation handled; no production needed.', { exact: true }),
   ).toBeVisible()
   await page.getByRole('button', { name: /Cerrar atenci/ }).click()
-  await page.getByRole('button', { name: 'Completar caso', exact: true }).click()
+  await page.getByRole('button', { name: 'Completar solicitud', exact: true }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByText(/expediente/)).toBeVisible()
-  await dialog.getByRole('button', { name: 'Completar caso', exact: true }).click()
+  await expect(dialog.locator('p').filter({ hasText: 'La solicitud dejará' })).toBeVisible()
+  await dialog.getByRole('button', { name: 'Completar solicitud', exact: true }).click()
   await expect(page.getByText('Completado', { exact: true }).first()).toBeVisible()
   const completed = await (await page.request.get(`/api/cases/${record.id}`)).json()
   expect(completed.lifecycle).toBe('Completado')
-  await page.getByRole('button', { name: 'Reactivar caso', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Completar caso', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Reactivar solicitud', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Completar solicitud', exact: true })).toBeVisible()
   const current = await (await page.request.get(`/api/cases/${record.id}`)).json()
   expect(current.lifecycle).toBe('Activo')
   expect(
@@ -157,7 +182,7 @@ test('borradores por canal sobreviven navegación y recarga', async ({ page }) =
   await expect(page.getByLabel('Nota interna', { exact: true })).toHaveValue(
     'Nota interna que nunca debe salir',
   )
-  await page.getByRole('link', { name: 'Mis casos', exact: true }).click()
+  await page.getByRole('link', { name: 'Mis solicitudes', exact: true }).click()
   await page.goto('/cases/' + record.id)
   await page.getByRole('tab', { name: 'Correo', exact: true }).click()
   await expect(page.getByLabel('Registro de interacción')).toHaveValue(
@@ -192,9 +217,14 @@ test('error real de validación conserva formulario y conversión mantiene exped
   await expect(d.getByLabel('Ancho', { exact: true })).toHaveValue('1.25')
   await d.getByLabel('Anticipo requerido (HNL)').fill('0')
   await d.getByRole('button', { name: /Generar orden de producción/ }).click()
+  await expect(d.getByText('Orden creada en Aprobación.')).toBeVisible()
+  await d.getByRole('button', { name: 'Mantener en Aprobación' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(page).toHaveURL(new RegExp('/cases/' + record.id + '$'))
-  await expect(page.getByLabel('Etapas de producción')).toBeVisible()
+  await expect(page).toHaveURL(new RegExp('/cases/' + record.id + '\\?production_id='))
+  const stageBar = page.getByLabel('Etapas de producción')
+  await expect(stageBar).toBeVisible()
+  await expect(stageBar.locator('li').first()).not.toHaveClass(/done/)
+  await expect(stageBar.locator('li').first().locator('svg')).toHaveCount(0)
   await page.getByRole('button', { name: 'Producción', exact: true }).click()
   await expect(
     page.getByText('Ojillos cada 50 cm; conservar este texto', { exact: true }),
@@ -204,9 +234,63 @@ test('error real de validación conserva formulario y conversión mantiene exped
   await page.screenshot({ path: '../.runtime/comgraf-ficha.png', fullPage: true })
 })
 
+test('una solicitud admite varias partidas por orden y varias órdenes independientes', async ({ page }) => {
+  const record = await createCase(page, 'E2E Varias órdenes en un expediente')
+  await page.getByRole('button', { name: 'Generar orden de producción', exact: true }).click()
+  let dialog = page.getByRole('dialog')
+  let items = dialog.locator('.item-editor')
+  await items.nth(0).getByLabel('Producto', { exact: true }).selectOption('Banners y lonas')
+  await items.nth(0).getByLabel('Precio unitario (HNL)').fill('250')
+  await items.nth(0).getByLabel('Ancho').fill('1.25')
+  await items.nth(0).getByLabel('Alto').fill('2.50')
+  await items.nth(0).getByLabel('Material / papel').fill('Lona 13 oz')
+  await dialog.getByRole('button', { name: 'Agregar producto', exact: true }).click()
+  items = dialog.locator('.item-editor')
+  await items.nth(1).getByLabel('Producto', { exact: true }).selectOption('Otros trabajos')
+  await items.nth(1).getByLabel('Precio unitario (HNL)').fill('15')
+  await items.nth(1).getByLabel('Especificaciones adicionales').fill('Paquete de tarjetas complementario')
+  await dialog.getByRole('button', { name: /Generar orden de producción/ }).click()
+  await dialog.getByRole('button', { name: 'Mantener en Aprobación' }).click()
+  await expect(page).toHaveURL(new RegExp('/cases/' + record.id + '\\?production_id='))
+  await page.getByRole('button', { name: 'Producción', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Especificaciones de producción' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Banners y lonas' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Otros trabajos' })).toBeVisible()
+  const firstOrderLink = page.getByRole('list', { name: 'Órdenes de producción' }).locator('[role="listitem"]').first()
+  const firstOrderUrl = await firstOrderLink.getAttribute('href')
+  await page.getByRole('button', { name: 'Agregar orden de producción', exact: true }).click()
+  dialog = page.getByRole('dialog')
+  items = dialog.locator('.item-editor')
+  await items.nth(0).getByLabel('Producto', { exact: true }).selectOption('Talonarios y facturas')
+  await items.nth(0).getByLabel('Precio unitario (HNL)').fill('20')
+  await items.nth(0).getByLabel('Ancho').fill('21')
+  await items.nth(0).getByLabel('Alto').fill('14')
+  await items.nth(0).getByLabel('Material / papel').fill('Original y copia')
+  await items.nth(0).getByLabel('Caras', { exact: true }).selectOption('1')
+  await items.nth(0).getByLabel('Tintas').fill('Negro')
+  await dialog.getByRole('button', { name: /Generar orden de producción/ }).click()
+  await dialog.getByRole('button', { name: 'Pasar a Impresión', exact: true }).click()
+  await expect(page.getByRole('list', { name: 'Órdenes de producción' }).locator('[role="listitem"]')).toHaveCount(2)
+  await expect(page.getByRole('heading', { name: 'Talonarios y facturas' })).toBeVisible()
+  await expect(page.getByText('Etapa actual: Impresión')).toBeVisible()
+  await page.goto(firstOrderUrl)
+  await page.getByRole('button', { name: 'Producción', exact: true }).click()
+  await expect(page.getByText('Etapa actual: Aprobación')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Banners y lonas' })).toBeVisible()
+  const persisted = await (await page.request.get(`/api/cases/${record.id}`)).json()
+  expect(persisted.production_count).toBe(2)
+  expect(persisted.productions.map((order) => order.stage).sort()).toEqual(['APPROVAL', 'PRINTING'])
+  expect(persisted.productions.map((order) => order.order_number).filter(Boolean)).toHaveLength(2)
+  const productCounts = await Promise.all(persisted.productions.map(async (order) => {
+    const details = await (await page.request.get(`/api/cases/${record.id}?production_id=${order.id}`)).json()
+    return details.items.length
+  }))
+  expect(productCounts.sort()).toEqual([1, 2])
+})
+
 test('filtros y vistas conservados al volver desde el expediente', async ({ page }) => {
   const record = await createCase(page, 'E2E Filtros persistentes')
-  await page.getByRole('link', { name: 'Mis casos', exact: true }).click()
+  await page.getByRole('link', { name: 'Mis solicitudes', exact: true }).click()
   await page.getByLabel('Estado', { exact: true }).selectOption('Abierto')
   await page.getByLabel('Modo', { exact: true }).selectOption('Atención')
   await page.getByLabel('Orden', { exact: true }).selectOption('oldest')
@@ -230,16 +314,22 @@ test('crear cliente y caso desde formularios y encontrar su historial', async ({
   await page.getByRole('dialog').getByLabel('Teléfonos (uno por línea)').fill('+504 9876-5432')
   await page.getByRole('dialog').getByRole('button', { name: 'Guardar', exact: true }).click()
   await page.getByRole('link', { name, exact: true }).click()
-  await page.getByRole('button', { name: 'Nuevo caso', exact: true }).click()
+  await page.getByRole('button', { name: 'Nueva solicitud', exact: true }).click()
   await page
     .getByRole('dialog')
     .getByLabel('Asunto', { exact: true })
     .fill('Consulta de libretas para librería')
+  await page.getByRole('dialog').getByLabel('Tipo de atención', { exact: true }).selectOption('Solicitud')
   await page.getByRole('dialog').getByRole('button', { name: 'Guardar', exact: true }).click()
   await expect(
     page.getByRole('heading', { name: 'Consulta de libretas para librería' }),
   ).toBeVisible()
   const caseId = new URL(page.url()).pathname.split('/').pop()
+  const created = await (await page.request.get(`/api/cases/${caseId}`)).json()
+  expect(created.kind).toBe('Solicitud')
+  expect(created.mode).toBe('Atención')
+  expect(created.production).toBeNull()
+  expect(created.ledger).toEqual([])
   await page.getByLabel('Búsqueda global').fill('50498765432')
   await page.getByLabel('Búsqueda global').press('Enter')
   await expect(page.locator(`a[href="/cases/${caseId}"]`)).toBeVisible()
@@ -265,7 +355,7 @@ test('autocompletado conserva relaciones y los datos al crear cliente en línea'
     data: { name: 'Contacto principal', phone: '9999' },
   })
   expect(contactResponse.ok()).toBeTruthy()
-  await page.getByRole('button', { name: 'Nuevo caso', exact: true }).click()
+  await page.getByRole('button', { name: 'Nueva solicitud', exact: true }).click()
   let d = page.getByRole('dialog'),
     customer = d.getByLabel('Cliente')
   await customer.fill('Autocomplete ' + Date.now())
@@ -296,7 +386,7 @@ test('autocompletado conserva relaciones y los datos al crear cliente en línea'
   expect(alternateResponse.ok()).toBeTruthy()
   const alternate = await alternateResponse.json()
   await page.goto('/')
-  await page.getByRole('button', { name: 'Nuevo caso', exact: true }).click()
+  await page.getByRole('button', { name: 'Nueva solicitud', exact: true }).click()
   d = page.getByRole('dialog')
   await d.getByLabel('Cliente').fill(name)
   await expect(d.getByRole('option').filter({ hasText: name })).toBeVisible()
@@ -321,7 +411,7 @@ test('autocompletado conserva relaciones y los datos al crear cliente en línea'
   expect(savedCase.contact_id ?? null).toBeNull()
 
   await page.goto('/')
-  await page.getByRole('button', { name: 'Nuevo caso', exact: true }).click()
+  await page.getByRole('button', { name: 'Nueva solicitud', exact: true }).click()
   d = page.getByRole('dialog')
   const provisional = 'Provisional en flujo ' + Date.now()
   await d.getByLabel('Asunto').fill('No perder este asunto')
@@ -373,7 +463,9 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   await dialog.getByLabel('Anticipo requerido (HNL)').fill('100')
   await dialog.getByLabel('Modalidad de entrega').fill('Retiro en taller')
   await dialog.getByRole('button', { name: /Generar orden de producción/ }).click()
-  await expect(page).toHaveURL(new RegExp('/cases/' + record.id + '$'))
+  await expect(dialog.getByText('Orden creada en Aprobación.')).toBeVisible()
+  await dialog.getByRole('button', { name: 'Mantener en Aprobación' }).click()
+  await expect(page).toHaveURL(new RegExp('/cases/' + record.id + '\\?production_id='))
   await page.reload()
   await page.getByRole('button', { name: 'Actividad', exact: true }).click()
   const orderLink = page.getByRole('link', { name: /Orden OP-/ })
@@ -409,7 +501,19 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   await dialog.getByLabel('Versión del arte').fill('v1')
   await dialog.getByRole('button', { name: 'Guardar' }).click()
   await page.getByRole('button', { name: 'Producción' }).click()
-  for (const stage of ['Aprobación', 'Impresión', 'Taller', 'Listo para entregar']) {
+  for (const stage of ['Impresión', 'Encuadernación', 'Listo para entregar']) {
+    if (stage === 'Listo para entregar') {
+      await expect(page.getByRole('button', { name: 'Registrar reclamo', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Registrar reclamo', exact: true }).click()
+      dialog = page.getByRole('dialog')
+      await dialog.getByLabel('Regresar a').selectOption('PRINTING')
+      await dialog.getByLabel('Motivo del reclamo').fill('Ajuste interno de color, sin nuevo cargo.')
+      await dialog.getByRole('button', { name: 'Registrar reclamo', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'Avanzar a Encuadernación' })).toBeVisible()
+      await page.getByRole('button', { name: 'Avanzar a Encuadernación' }).click()
+      dialog = page.getByRole('dialog')
+      await dialog.getByRole('button', { name: 'Avanzar a Encuadernación' }).click()
+    }
     await page.getByRole('button', { name: `Avanzar a ${stage}` }).click()
     dialog = page.getByRole('dialog')
     await dialog.getByRole('button', { name: `Avanzar a ${stage}` }).click()
@@ -442,7 +546,7 @@ test('cotización aceptada, producción activa, bloqueo, entrega parcial y cobra
   await expect(page.getByText('Comprobante E2E entrega parcial 40.')).toBeVisible()
   await page.getByRole('button', { name: 'Cerrar atención' }).click()
   await expect(page.getByRole('button', { name: 'Abrir atención' })).toBeVisible()
-  await expect(page.getByText('Parcial', { exact: true })).toBeVisible()
+  await expect(page.getByText('Comprobante E2E entrega parcial 40.', { exact: true })).toBeVisible()
   const full = await page.request.get(`/api/cases/${record.id}`)
   expect(full.ok()).toBeTruthy()
   const current = await full.json()

@@ -61,7 +61,7 @@ function Login() {
           <h1>
             Todo tu taller.
             <br />
-            Un mismo expediente.
+            Una misma solicitud.
           </h1>
           <p>
             Atención, producción y seguimiento conectados para que el equipo trabaje con claridad.
@@ -137,7 +137,7 @@ export default function App() {
   const links = [
     ['/', 'Mi día', LayoutDashboard],
     ['/inbox/pool', 'Pool general', InboxIcon],
-    ['/inbox/mine', 'Mis casos', FolderOpen],
+    ['/inbox/mine', 'Mis solicitudes', FolderOpen],
     ...(can(user, 'clients') ? [['/clients', 'Clientes', Users]] : []),
     ['/inbox/production', 'Producción', Printer],
     ['/inbox/ready', 'Entregas y cobros', Truck],
@@ -163,7 +163,7 @@ export default function App() {
         <div className="workspace">
           <span className="workspace-icon">CG</span>
           <div>
-            <strong>Taller Comgraf</strong>
+        <strong>Comgraf</strong>
             <small>Espacio de trabajo local</small>
           </div>
           <span className="online-dot" />
@@ -184,6 +184,7 @@ export default function App() {
       <div className="workspace-main">
         <header className="topbar">
           <form
+            className="global-search"
             onSubmit={(e) => {
               e.preventDefault()
               if (search.trim()) nav('/search?q=' + encodeURIComponent(search.trim()))
@@ -192,11 +193,11 @@ export default function App() {
             <Search size={18} />
             <input
               aria-label="Búsqueda global"
-              placeholder="Buscar cliente, RTN, teléfono o expediente…"
+              placeholder="Buscar cliente, RTN, teléfono, correo o solicitud…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <kbd>↵</kbd>
+            <button type="submit" aria-label="Buscar">Buscar</button>
           </form>
           <div className="account">
             <div className="avatar">{user.name.slice(0, 2).toUpperCase()}</div>

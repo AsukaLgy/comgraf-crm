@@ -8,16 +8,20 @@ React 19 + JavaScript + Vite. FastAPI sirve los archivos compilados y `/api` des
 
 ## Expediente único
 
-`cases.id` es estable; número visible `CG-000001`; enlace `/cases/1`. Cliente y contacto son claves foráneas. `productions.case_id` es simultáneamente clave primaria y referencia al caso. Convertir nunca crea otro expediente ni modifica notas, cliente o responsable de atención.
+`cases.id` es estable; número visible `CG-000001`; enlace `/cases/1`. Cliente y contacto son claves foráneas. Una solicitud puede tener varias órdenes; `productions.id` identifica cada OP y `productions.case_id` la vincula al expediente. La revisión 008 conserva como IDs las claves históricas de las órdenes, de modo que sus números OP y enlaces `/cases/{id}` existentes siguen resolviendo la orden original. Partidas, movimientos y seguimientos nuevos guardan además `production_id`; la solicitud conserva cliente, propietario, atención, ciclo de vida, notas y comunicación comunes.
 
 Estados independientes:
 
-- Atención: Abierto (requiere acción) o Cerrado (atendido por ahora). El cierre no termina el trabajo.
-- Producción: NEW/Nuevo → APPROVAL/Aprobación → PRINTING/Impresión → WORKSHOP/Taller → READY/Listo para entregar. Solo estos cinco códigos estables son etapas; programación es una fecha independiente.
+- Atención: Abierto o Cerrado. El cierre no termina el trabajo ni elimina mensajes entrantes pendientes; se responde antes de cerrar.
+- Orden de producción: NEW/Nuevo → APPROVAL/Aprobación → PRINTING/Impresión → WORKSHOP/Encuadernación → READY/Listo para entregar. Solo estos cinco códigos estables son etapas; programación es una fecha independiente.
 - Entrega: Pendiente, Parcial, Completa; calculada por cantidades de cada partida.
 - Cobro: Pendiente, Vencido, Pagado, A favor; calculado a partir de movimientos.
 
-Cancelación es un evento excepcional con motivo y fecha. No elimina obligaciones, entregas ni pagos. Cerrar atención no exige justificación y conserva producción, tareas futuras y cobranza; los vencimientos abiertos se deben resolver antes del cierre. Abrir atención, una interacción entrante o un seguimiento vencido hace que el caso requiera acción. Casos con procesos independientes se vinculan mediante `related_case_id`.
+Cancelación es un evento excepcional con motivo y fecha. No elimina obligaciones, entregas ni pagos. Cerrar atención conserva producción, tareas futuras y cobranza; los vencimientos abiertos y mensajes entrantes pendientes requieren atención aunque el estado esté cerrado. Casos con procesos independientes se vinculan mediante `related_case_id`.
+
+Las bandejas operativas tienen predicados compartidos entre consulta y contador: Sin asignar = activa y sin propietario; Mis solicitudes = activa y propiedad del usuario; Requieren acción = activa, visible y sin propietario, con atención abierta, mensaje entrante pendiente o seguimiento vencido; Requieren mi acción agrega propiedad del usuario. Trabajo futuro, saldo pendiente o producción activa no disparan contacto por sí solos. La carga de trabajo conserva sus criterios operativos separados.
+
+Una producción se completa automáticamente al registrar la última entrega total solo si el libro de movimientos permite verificar saldo cero, hay obligación de la moneda de la orden y no quedan tareas, mensajes, bloqueos, cotizaciones pendientes ni resolución económica. Se vuelve a evaluar tras cada operación que puede resolver uno de esos pendientes. Consultas y cotizaciones sin producción usan finalización manual. `completions-preview` y `regularize-completions` permiten revisar y, con confirmación explícita, regularizar filas históricas equivalentes; la regularización agrega fecha actual y evento auditable sin rehacer movimientos ni cantidades.
 
 Cada transición de atención nueva registra usuario, hora, estado anterior/nuevo y origen. La revisión 003 normalizó en lote estados activos anteriores; como esa revisión ya fue aplicada antes de esta corrección, el valor previo de esas filas no se puede recuperar del historial local. No se supone un estado original: las transiciones posteriores sí quedan trazadas.
 
@@ -31,7 +35,9 @@ Se usa aislamiento READ COMMITTED para que la segunda transacción vea el result
 
 Las cotizaciones guardan versiones inmutables en HNL y registran la decisión de cada versión. Una cotización histórica en USD permanece en USD y debe revisarse en una nueva versión HNL antes de convertirla; nunca se calcula una tasa implícita.
 
-Generar una orden amplía el mismo expediente y la deja activa en Nuevo. Aprobación es una revisión operativa con el cliente, no autorización interna. No hay requisito de anticipo, arte adjunto o responsable por área para avanzar. Se guarda una instantánea inicial de partidas en specs_snapshot. El avance normal usa transiciones explícitas consecutivas; los retrocesos y bloqueos exigen motivo. La programación conserva sus fechas anterior/nueva, usuario y hora, sin razón obligatoria; el compromiso original permanece. Órdenes antiguas con etapa ambigua conservan `legacy_stage`, quedan sin etapa activa y muestran clasificación requerida. Seleccionarla registra una clasificación operativa sin atribuir un avance físico o inventar tiempos históricos.
+Cada orden contiene una o varias partidas y una etapa/agenda propias. Generar una orden nueva la deja directamente en Aprobación, registra quién la creó y conserva una instantánea de productos; no registra una transición desde Nuevo ni evidencia de aprobación. La interfaz permite mantenerla en Aprobación o iniciar Impresión como segunda operación idempotente y auditable. Aprobación es una etapa actual, no una aprobación del cliente. No hay requisito de anticipo, arte adjunto o responsable por área para avanzar. El avance normal usa transiciones explícitas consecutivas; los retrocesos y bloqueos exigen motivo. La programación conserva sus fechas anterior/nueva, usuario y hora, sin razón obligatoria; el compromiso original permanece. Las órdenes antiguas en Nuevo o con etapa ambigua conservan sus datos; seleccionar una etapa histórica requiere clasificación explícita.
+
+El calendario distingue eventos (entrega comprometida, inicio programado y seguimiento) de la etapa actual de una orden. Las OP entregadas por completo o anuladas salen de eventos pendientes. La bandeja de producción y Listos para entregar cuentan y muestran órdenes; los filtros generales de etapa sobre solicitudes usan existencia de una OP coincidente y no duplican el expediente. La ficha imprimible y cada evento de producción llevan la OP seleccionada.
 
 ## Dinero y tiempo
 
@@ -57,7 +63,7 @@ Contraseñas Argon2id. Sesiones aleatorias, almacenadas como SHA256, cookie Http
 
 ## Indicadores
 
-La pantalla explica sus denominadores: conversión de casos sobre todos los casos; aceptación sobre versiones; cotizaciones convertidas sobre versiones aceptadas; puntualidad sobre entregas completas contra compromiso original. Tiempo de primera respuesta cuenta primera interacción manual saliente o visita, no nota interna ni asignación. Tiempo por etapa incluye permanencia y bloqueos; tiempo bloqueado también se reporta aparte. Retrabajo cuenta retrocesos de etapas principales con motivo.
+La pantalla explica sus denominadores: conversión de solicitudes a órdenes de producción sobre todas las solicitudes; aceptación sobre versiones; cotizaciones convertidas sobre versiones aceptadas; puntualidad sobre entregas completas contra compromiso original. Tiempo de primera respuesta cuenta primera interacción manual saliente o visita, no nota interna ni asignación. Tiempo por etapa incluye permanencia y bloqueos; tiempo bloqueado también se reporta aparte. El indicador Reclamos conserva el conteo de retrocesos de producción registrados con motivo.
 
 ## Canales futuros
 

@@ -12,22 +12,22 @@ export default function CasePrintSheet({ id, record, person }) {
           <Printer size={16} />
           Imprimir / Guardar PDF
         </button>
-        <Link to={`/cases/${id}`}>Volver al expediente</Link>
+        <Link to={`/cases/${id}`}>Volver a la solicitud</Link>
       </div>
       <header>
         <div>
           <div className="brand-name">COMGRAF</div>
           <p>Comunicación Gráfica · Ficha de taller</p>
         </div>
-        <h1>{record.number}</h1>
+        <h1>{record.number}<br/><small>{production?.order_number || 'Orden de producción'}</small></h1>
       </header>
       {!production ? (
-        <p>Este expediente está en Atención y no tiene ficha de producción.</p>
+        <p>Esta solicitud está en Atención y no tiene ficha de producción.</p>
       ) : (
         <>
           <h2>{record.subject}</h2>
           <p>
-            Cliente: {record.client.name} · Responsable del caso: {person(record.owner_id)}
+            Cliente: {record.client.name} · Responsable de la solicitud: {person(record.owner_id)}
           </p>
           <p>
             Compromiso: {date(production.committed_date)} · Etapa:{' '}

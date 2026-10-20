@@ -19,7 +19,7 @@ export const PRODUCTION_STAGE_LABELS = Object.freeze({
   NEW: 'Nuevo',
   APPROVAL: 'Aprobación',
   PRINTING: 'Impresión',
-  WORKSHOP: 'Taller',
+  WORKSHOP: 'Encuadernación',
   READY: 'Listo para entregar',
 })
 

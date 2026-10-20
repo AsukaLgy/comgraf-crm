@@ -28,8 +28,8 @@ export default function CaseAttention({
       <section className="case-heading">
         <div>
           <div className="eyebrow">
-            EXPEDIENTE {record.number}{' '}
-            <Badge tone={record.production ? 'teal' : ''}>{record.mode}</Badge>
+            SOLICITUD {record.number}{' '}
+            <Badge tone={record.production_count ? 'teal' : ''}>{record.production_count ? `${record.production_count} órdenes` : record.mode}</Badge>
             {record.lifecycle === 'Completado' && <Badge tone="teal">Completado</Badge>}
           </div>
           <h1>{record.subject}</h1>
@@ -45,11 +45,11 @@ export default function CaseAttention({
           {!record.owner_id && canTake && (
             <button className="primary" onClick={onTake}>
               <UserRound size={15} />
-              Tomar caso
+              Tomar solicitud
             </button>
           )}
-          {canAssign && <button onClick={onAssign}>Asignar caso</button>}
-          {canAttend && !record.production && (
+          {canAssign && <button onClick={onAssign}>Asignar solicitud</button>}
+          {canAttend && !record.production_count && (
             <button className="primary" onClick={onConvert}>
               <Plus size={16} />
               Generar orden de producción
@@ -68,16 +68,16 @@ export default function CaseAttention({
                 !canComplete ? 'Revisa los pendientes para ver qué falta resolver.' : undefined
               }
             >
-              Completar caso
+              Completar solicitud
             </button>
           )}
           {canReactivate && record.lifecycle === 'Completado' && (
             <button className="primary" onClick={onReactivate} disabled={completionBusy}>
-              Reactivar caso
+              Reactivar solicitud
             </button>
           )}
           {record.production && (
-            <Link className="button" to={`/cases/${record.id}/print`}>
+            <Link className="button" to={`/cases/${record.id}/print?production_id=${record.production.id}`}>
               <Printer size={16} />
               Ficha de taller
             </Link>
@@ -95,14 +95,9 @@ export default function CaseAttention({
         <span>
           Atención: <strong>{person(record.owner_id)}</strong>
         </span>
-        {record.production && (
+        {record.production_count > 0 && (
           <>
-            <span>
-              Entrega:{' '}
-              <strong>
-                {record.delivery_status === 'Completa' ? 'Entregado' : record.delivery_status}
-              </strong>
-            </span>
+            <span><strong>{record.production_count} órdenes · {record.production_pending_count} pendientes</strong></span>
             {record.payment_status && (
               <span>
                 Pago:{' '}
@@ -121,9 +116,9 @@ export default function CaseAttention({
             )}
           </>
         )}
-        {canAttend && <button onClick={onEdit}>Editar datos del caso</button>}
+        {canAttend && <button onClick={onEdit}>Editar datos de la solicitud</button>}
         {record.related_case_id && (
-          <Link to={`/cases/${record.related_case_id}`}>Caso relacionado</Link>
+          <Link to={`/cases/${record.related_case_id}`}>Solicitud relacionada</Link>
         )}
         <span className="muted">Revisión {record.version}</span>
         <button className="text-button" onClick={onRefresh}>
@@ -132,7 +127,7 @@ export default function CaseAttention({
       </div>
       {canAttend && (
         <p className="muted">
-          Cerrar atención retira el caso de pendientes inmediatos; el trabajo y sus cobros
+          Cerrar atención retira la solicitud de pendientes inmediatos; el trabajo y sus cobros
           continúan.
         </p>
       )}

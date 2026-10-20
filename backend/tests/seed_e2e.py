@@ -14,7 +14,7 @@ if not settings.mysql_database.endswith('_test'): raise SystemExit('Solo base _t
 token = secrets.token_hex(4)
 password = secrets.token_urlsafe(24)
 with SessionLocal.begin() as db:
-    user = User(username='e2e_' + token, name='DEMO · Coordinación Comgraf', password_hash=passwords.hash(password), roles=['Administrador'])
+    user = User(username='e2e_' + token, name='DEMO · Coordinación Comgraf', password_hash=passwords.hash(password), roles=['Administrador'], capacity=500)
     db.add(user)
     db.flush()
     for name, subject, priority in [('DEMO · Café del Valle','Tarjetas para nueva sucursal','Alta'),('DEMO · Colegio Horizonte','Talonarios de matrícula','Normal'),('DEMO · Estudio Naranja','Consulta sobre impresión de portafolio','Normal')]:

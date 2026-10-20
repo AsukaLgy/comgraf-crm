@@ -37,10 +37,11 @@ services:
       interval: 20s
       timeout: 5s
       retries: 5
-    networks: [internal]
+    networks: [internal, web]
 volumes:
   mysql_data:
   uploads:
 networks:
   internal:
     internal: true
+  web:

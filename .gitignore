@@ -11,3 +11,4 @@ uploads/
 test-results/
 playwright-report/
 backups/
+backend/venv/
