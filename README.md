@@ -78,7 +78,8 @@ npm.cmd --prefix frontend run build
 cd backend
 ..\.venv\Scripts\python.exe -m alembic upgrade head
 ..\.venv\Scripts\python.exe -m app.cli create-admin
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+$env:APP_HOST = '127.0.0.1'; $env:APP_WORKERS = '1'
+..\.venv\Scripts\python.exe -m app.start
 ```
 
 Linux:
@@ -91,7 +92,7 @@ npm --prefix frontend run build
 cd backend
 ../.venv/bin/python -m alembic upgrade head
 ../.venv/bin/python -m app.cli create-admin
-../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+APP_HOST=127.0.0.1 APP_WORKERS=1 ../.venv/bin/python -m app.start
 ```
 
 Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vite reenvía `/api` a `127.0.0.1:8000` conservando el origen. Para uso normal utiliza la interfaz compilada servida por Python.
@@ -108,7 +109,11 @@ Para desarrollo de React, en otra terminal: `npm --prefix frontend run dev`. Vit
 
 Si se anula un trabajo, el usuario registra el motivo y elige **Sin cargo** o un **importe final acordado** (total definitivo del trabajo, no cargo adicional). El ajuste conserva obligación y pagos anteriores. Si el total pagado supera el importe final, queda saldo a favor; una devolución requiere que un usuario con permiso financiero confirme fecha/importe/referencia después de realizarla. Una persona que puede detener producción pero no ajustar cobros deja la resolución en la bandeja **Resolución de anulación**. Las órdenes históricas anuladas también requieren revisión explícita.
 
-Correo/WhatsApp muestran **No configurado**. Se guardan borradores y se registran interacciones manuales; no hay envíos simulados. Los borradores se guardan por solicitud/canal/usuario en MySQL; el navegador conserva un respaldo provisional durante la escritura. Las solicitudes y sus saldos nunca dependen de localStorage.
+En **Configuración → Correo de la empresa**, un administrador conecta Yahoo con la dirección y una contraseña de aplicación. Comgraf comprueba IMAP y SMTP por separado. El trabajador consulta INBOX aproximadamente cada minuto, importa solo los mensajes posteriores a la activación y no marca, mueve ni borra los mensajes de Yahoo. Los correos nuevos se vinculan por hilo o remitente inequívoco; los casos ambiguos y las respuestas a solicitudes completadas esperan clasificación manual.
+
+Desde una solicitud se pueden guardar borradores, elegir destinatario y adjuntos del expediente, y enviar correo. El CRM muestra estados de cola, aceptación SMTP, error o resultado incierto. “Aceptado por Yahoo” no significa entregado ni leído. Los reintentos con resultado incierto requieren revisar el buzón y confirmarlos manualmente. WhatsApp sigue siendo manual. Los borradores se guardan por solicitud/canal/usuario en MySQL y el navegador conserva un respaldo provisional de la escritura.
+
+Las migraciones aditivas `010_yahoo_mail` y `011_mail_retry_idempotency` agregan configuración cifrada, progreso IMAP, mensajes, adjuntos y salida idempotente; no reconstruyen la base. Antes de actualizar, respalda MySQL y adjuntos. En Compose, `app.start` aplica las migraciones y levanta un trabajador coordinado por bloqueo MySQL para evitar sincronizadores duplicados. La integración necesita una conexión saliente a Yahoo; el CRM local sigue abriendo si Internet no está disponible. La conexión real se valida al configurar el buzón desde la pantalla de administración.
 
 ## Actualización
 
@@ -125,7 +130,7 @@ El actualizador comprueba la configuración, instala dependencias solo si cambia
 
 Las migraciones `005_commercial_cancellation` y `006_cancelled_stage_snapshot` agregan trazabilidad y marcan anulaciones existentes para revisión; no cambian pagos, saldos ni etapas sin clasificar, y no se editan después de aplicadas. Las anulaciones antiguas requieren revisión explícita; no se ponen en cero automáticamente.
 
-Con Docker, después del respaldo: `docker compose build app` y `docker compose up -d app`. El arranque aplica Alembic antes de servir solicitudes. Comprueba `docker compose ps`, `/api/health`, login, expediente y descarga de archivo. Para instalar cambios sin Docker, usa el script Windows indicado arriba o ejecuta manualmente los pasos de Desarrollo sin Docker. Crea revisiones Alembic nuevas; no edites migraciones aplicadas. `alembic check` detecta diferencias entre modelos y esquema.
+Con Docker, después del respaldo: `docker compose build app` y `docker compose up -d app`. El arranque aplica Alembic antes de servir solicitudes e inicia el trabajador Yahoo separado del servidor web. Comprueba `docker compose ps`, `/api/health`, login, expediente y descarga de archivo. Para instalar cambios sin Docker, usa el script Windows indicado arriba o ejecuta manualmente los pasos de Desarrollo sin Docker. Crea revisiones Alembic nuevas; no edites migraciones aplicadas. `alembic check` detecta diferencias entre modelos y esquema.
 
 ## Respaldo y restauración de Compose
 
@@ -134,6 +139,8 @@ python scripts/backup.py backup
 ```
 
 Detiene brevemente la aplicación para congelar altas de archivos, genera SQL con `mysqldump --single-transaction`, copia adjuntos, marca `COMPLETE` y reinicia la aplicación. Escribe SQL como bytes, sin tuberías de PowerShell que alteren codificación. Guarda `.env` por separado, protegido, junto con la versión de código correspondiente. Copia los respaldos fuera del disco del servidor.
+
+La contraseña Yahoo se cifra con una clave Fernet persistente que queda fuera de MySQL y Git. Para restaurar esos mensajes y poder descifrar la cuenta, respalda **también** la clave; el script SQL/adjuntos no la incluye. En Compose, cópiala con `docker compose cp --archive app:/data/mail-secrets/fernet.key /ruta/privada/fernet.key` y guárdala cifrada en un medio distinto al servidor. En la instalación local se encuentra en `.runtime/mail-secrets/fernet.key`. Restaura la clave en el mismo directorio antes de iniciar Comgraf con la base respaldada. No la regeneres ni la compartas junto a una copia accesible de la base.
 
 Restauración explícita, **reemplaza los datos de la instalación**:
 
@@ -208,7 +215,7 @@ El comando vuelve a comprobar la elegibilidad dentro de la transacción, registr
 - [Referencias inspeccionadas y procedencia](docs/REFERENCIAS.md).
 - [Verificación y limitaciones reales](docs/VERIFICACION.md).
 
-Control operativo de cobros; no reemplaza contabilidad ni un sistema fiscal. No integra correo/WhatsApp. No implementa SaaS, multitenencia ni API pública. No se ha publicado en Internet.
+Control operativo de cobros; no reemplaza contabilidad ni un sistema fiscal. Integra recepción y envío de correo Yahoo; WhatsApp permanece manual. No implementa SaaS, multitenencia ni API pública. No se ha publicado en Internet.
 
 Las migraciones se aplican en orden con `alembic upgrade head`; la migración 002 normaliza únicamente equivalencias inequívocas de Contado/Crédito y agrega la instantánea de especificaciones. No altera importes, saldos, pagos ni fechas históricas.
 

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     session_hours: int = 12
     product_version: str = '1.4.0'
     build_id: str = 'local-1.4.0'
+    mail_encryption_key_file: str = '../.runtime/mail-secrets/fernet.key'
+    mail_sync_interval_seconds: int = 60
+    mail_connect_timeout_seconds: int = 10
 
     @property
     def database_url(self):

@@ -162,6 +162,10 @@ def draft(case_id: int, channel: str, data: s.DraftInput, user=Depends(current_u
         draft = Draft(case_id=case_id, user_id=user.id, channel=channel, version=0)
         db.add(draft)
     draft.body = data.body
+    draft.email_to = data.email_to
+    draft.email_subject = data.email_subject
+    draft.email_attachment_ids = data.email_attachment_ids
+    draft.email_thread_root = data.email_thread_root
     draft.version += 1
     db.flush()
     return row(draft)

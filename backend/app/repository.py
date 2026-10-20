@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from sqlalchemy import select, or_, func, case as sql_case, and_, not_, literal
 from sqlalchemy.orm import aliased
-from .models import Attachment, Case, Client, Delivery, Draft, Event, Item, Ledger, Production, Quote, Task, User, now
+from .models import Attachment, Case, Client, Delivery, Draft, Event, Item, Ledger, MailAttachment, MailMessage, Production, Quote, Task, User, now
 from .security import can
 from .config import settings
 from .schemas import STAGE_LABELS
@@ -15,6 +15,10 @@ from .schemas import STAGE_LABELS
 # ---- Normalización, fechas y serialización HTTP ----
 def normalize(value):
     return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKD', str(value)).encode('ascii', 'ignore').decode().lower())
+
+
+def client_search_text(client, contacts=()):
+    return normalize(' '.join([client.name, client.company, client.rtn, *(client.phones or []), *(client.emails or []), *[f'{contact.name} {contact.phone} {contact.email}' for contact in contacts]]))
 
 
 def today():
@@ -259,6 +263,18 @@ def case_detail(db, user, case, production_id=None):
     if selected_production_id is not None: ledger_query = ledger_query.where(Ledger.production_id == selected_production_id)
     result['ledger'] = [row(e) for e in db.scalars(ledger_query.order_by(Ledger.id))] if commercial else []
     result['drafts'] = [row(d) for d in db.scalars(select(Draft).where(Draft.case_id == case.id, Draft.user_id == user.id).order_by(Draft.id))]
+    result['email_messages'] = []
+    for message in db.scalars(select(MailMessage).where(MailMessage.case_id == case.id).order_by(MailMessage.created_at, MailMessage.id)):
+        attachments = db.scalars(select(MailAttachment).where(MailAttachment.message_id == message.id).order_by(MailAttachment.id)).all()
+        result['email_messages'].append({
+            'id': message.id, 'direction': message.direction, 'status': message.status,
+            'sender': message.sender, 'to': message.to_addresses or [], 'cc': message.cc_addresses or [],
+            'subject': message.subject, 'body_text': message.body_text, 'message_id': message.message_id,
+            'thread_root': message.thread_root, 'created_at': message.created_at.replace(tzinfo=timezone.utc).isoformat(),
+            'received_at': message.received_at.replace(tzinfo=timezone.utc).isoformat() if message.received_at else None,
+            'error_code': message.error_code, 'sent_copy_status': message.sent_copy_status,
+            'attachments': [{'id': attachment.id, 'filename': attachment.filename, 'mime': attachment.mime, 'size': attachment.size} for attachment in attachments],
+        })
     return result
 
 

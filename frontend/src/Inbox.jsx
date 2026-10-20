@@ -68,6 +68,7 @@ export default function Inbox({ user, view = 'pool', home = false, search = fals
   const list = useQuery({
     queryKey: [orderView ? 'orders' : 'cases', user.id, effective],
     queryFn: () => api((orderView ? '/orders?' : '/cases?') + new URLSearchParams(effective)),
+    refetchInterval: search ? false : 30000,
   })
   const personalCounters = useQuery({
     queryKey: ['personal-counts', user.id, compatibleFilters],

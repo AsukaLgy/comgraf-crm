@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from .config import settings
 from .db import engine, SessionLocal
-from .routers import auth, clients, cases, production, reports, scanner
+from .routers import auth, clients, cases, production, reports, scanner, mail
 from .services import reopen_overdue_attention
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,11 @@ async def http_error(request: Request, error: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, error: RequestValidationError):
-    return JSONResponse({'detail': error.errors(), 'code': 'FIELD_VALIDATION'}, status_code=422)
+    details = error.errors()
+    for item in details:
+        if 'application_password' in item.get('loc', ()):
+            item.pop('input', None)
+    return JSONResponse({'detail': details, 'code': 'FIELD_VALIDATION'}, status_code=422)
 
 
 @app.exception_handler(IntegrityError)
@@ -100,7 +104,7 @@ async def unavailable(request, error):
     return JSONResponse({'detail': 'La base de datos no está disponible o hubo un conflicto transaccional. Conserva el formulario y reintenta.'}, 503)
 
 
-for router in (auth.router, clients.router, cases.router, production.router, reports.router, scanner.router):
+for router in (auth.router, clients.router, cases.router, production.router, reports.router, scanner.router, mail.router):
     app.include_router(router)
 
 

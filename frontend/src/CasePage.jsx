@@ -24,7 +24,7 @@ export default function CasePage({ user, print = false }) {
     [section, setSection] = useState('Actividad'),
     [attentionError, setAttentionError] = useState(null),
     [attentionBusy, setAttentionBusy] = useState(false)
-  const query = useQuery({ queryKey: ['case', id, selectedProductionId], queryFn: () => api('/cases/' + id + (selectedProductionId ? `?production_id=${selectedProductionId}` : '')) }),
+  const query = useQuery({ queryKey: ['case', id, selectedProductionId], queryFn: () => api('/cases/' + id + (selectedProductionId ? `?production_id=${selectedProductionId}` : '')), refetchInterval: 30000 }),
     people = useQuery({ queryKey: ['users'], queryFn: () => api('/users') })
   if (query.isPending) return <Loading />
   if (query.error) return <ErrorBox error={query.error} />

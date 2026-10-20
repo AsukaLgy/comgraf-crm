@@ -17,6 +17,6 @@ if (-not (Test-TcpPort 3307)) {
 for ($Attempt = 0; $Attempt -lt 60 -and -not (Test-TcpPort 3307); $Attempt++) { Start-Sleep -Seconds 1 }
 if (-not (Test-TcpPort 3307)) { throw 'MySQL no quedó disponible en 127.0.0.1:3307. Revisa .runtime/mysql.log.' }
 Set-Location -LiteralPath (Join-Path $ComgrafRoot 'backend')
-& (Join-Path $ComgrafRoot '.venv/Scripts/python.exe') -m alembic upgrade head
-if ($LASTEXITCODE -ne 0) { throw 'No se pudieron aplicar las migraciones' }
-& (Join-Path $ComgrafRoot '.venv/Scripts/python.exe') -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+$env:APP_HOST = '127.0.0.1'
+$env:APP_WORKERS = '1'
+& (Join-Path $ComgrafRoot '.venv/Scripts/python.exe') -m app.start

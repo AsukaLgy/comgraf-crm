@@ -20,8 +20,47 @@ def fail(message, code=422):
 
 
 def event(db, case, user, body, kind='Sistema', channel='Sistema', data=None):
-    db.add(Event(case_id=case.id, actor_id=user.id, body=body, kind=kind, channel=channel, data=data or {}))
+    db.add(Event(case_id=case.id, actor_id=user.id if user else None, body=body, kind=kind, channel=channel, data=data or {}))
     case.updated_at = now()
+
+
+def attach_incoming_mail(db, case, message, body, actor=None, *, event_kind='Correo entrante', event_data=None,
+                         reopen_origin='incoming_email', reopen_body='Atención abierta automáticamente por correo entrante'):
+    """Apply the shared attention and history rules for an imported or classified message."""
+    message.case_id = case.id
+    if not message.thread_root:
+        message.thread_root = message.message_id or message.in_reply_to
+    if case.lifecycle == 'Completado':
+        message.status = 'Pendiente de clasificación'
+        return False
+    message.status = 'Vinculado'
+    case.pending_message = True
+    if case.status == 'Cerrado':
+        previous = case.status
+        case.status = 'Abierto'
+        case.closed_at = None
+        event(db, case, actor, reopen_body, data={
+            'action': 'attention_status', 'from': previous, 'to': 'Abierto', 'origin': reopen_origin,
+        })
+    data = {
+        'direction': 'Entrante', 'email_message_id': message.id, 'message_id': message.message_id,
+        'thread_root': message.thread_root,
+    }
+    data.update(event_data or {})
+    event(db, case, actor, body, kind=event_kind, channel='Correo', data=data)
+    case.version += 1
+    return True
+
+
+def create_incoming_email_case(db, client, message, subject, description, event_body):
+    """Create the standard open, unassigned attention case for a newly classified sender."""
+    case = Case(client_id=client.id, subject=(subject or 'Consulta recibida por correo')[:240],
+        description=(description or '')[:5000], kind='Consulta', channel='Correo', owner_id=None,
+        status='Abierto', mode='Atención', pending_message=True, lifecycle='Activo')
+    db.add(case)
+    db.flush()
+    attach_incoming_mail(db, case, message, event_body, event_data={'automatic': True})
+    return case
 
 
 def finalize_case(db, case, actor_id, *, origin, action_trigger, regularization_run=None):

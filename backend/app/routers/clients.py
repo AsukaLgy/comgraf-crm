@@ -4,13 +4,9 @@ from ..db import get_db
 from ..models import Client, Contact
 from ..schemas import ClientInput, ClientUpdate, ContactInput
 from ..security import current_user, require
-from ..repository import normalize, row, cases_list, get_case, case_detail
+from ..repository import client_search_text, normalize, row, cases_list, get_case, case_detail
 
 router = APIRouter(prefix='/api/clients', tags=['Clientes'])
-
-
-def search_text(client, contacts=()):
-    return normalize(' '.join([client.name, client.company, client.rtn, *client.phones, *client.emails, *[f'{c.name} {c.phone} {c.email}' for c in contacts]]))
 
 
 @router.get('')
@@ -25,7 +21,7 @@ def clients(q: str = '', user=Depends(current_user), db=Depends(get_db, scope='f
 def create_client(data: ClientInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'clients')
     client = Client(**data.model_dump())
-    client.search_text = search_text(client)
+    client.search_text = client_search_text(client)
     db.add(client)
     db.flush()
     return row(client, ('search_text',))
@@ -56,7 +52,7 @@ def update(client_id: int, data: ClientUpdate, user=Depends(current_user), db=De
     if client.version != data.version: raise HTTPException(409, 'El cliente cambió; actualiza su perfil')
     for key, value in data.model_dump(exclude={'version'}).items(): setattr(client, key, value)
     client.version += 1
-    client.search_text = search_text(client, db.scalars(select(Contact).where(Contact.client_id == client_id)))
+    client.search_text = client_search_text(client, db.scalars(select(Contact).where(Contact.client_id == client_id)))
     return row(client, ('search_text',))
 
 
@@ -68,6 +64,6 @@ def contact(client_id: int, data: ContactInput, user=Depends(current_user), db=D
     contact = Contact(client_id=client_id, **data.model_dump())
     db.add(contact)
     db.flush()
-    client.search_text = search_text(client, db.scalars(select(Contact).where(Contact.client_id == client_id)))
+    client.search_text = client_search_text(client, db.scalars(select(Contact).where(Contact.client_id == client_id)))
     client.version += 1
     return row(contact)

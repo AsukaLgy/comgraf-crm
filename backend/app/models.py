@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Date, Numeric, JSON, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, BigInteger, String, Text, Boolean, DateTime, Date, Numeric, JSON, ForeignKey, UniqueConstraint, Index
 from .db import Base
 
 
@@ -263,6 +263,10 @@ class Draft(Base):
     channel = Column(String(30), nullable=False)
     body = Column(Text, nullable=False)
     version = Column(Integer, nullable=False, default=1)
+    email_to = Column(String(1000), nullable=False, default='')
+    email_subject = Column(String(998), nullable=False, default='')
+    email_attachment_ids = Column(JSON, nullable=False, default=list)
+    email_thread_root = Column(String(255), nullable=False, default='')
 
 
 class SavedView(Base):
@@ -276,6 +280,7 @@ class SavedView(Base):
 
 class PartialReleaseRequest(Base):
     __tablename__ = 'partial_release_requests'
+    __table_args__ = (Index('ix_partial_release_status_case', 'status', 'case_id'),)
     id = Column(Integer, primary_key=True)
     case_id = Column(ForeignKey('cases.id'), nullable=False, index=True)
     production_id = Column(ForeignKey('productions.id'), nullable=False, index=True)
@@ -299,6 +304,85 @@ class ProviderInbox(Base):
     case_id = Column(ForeignKey('cases.id'))
     payload = Column(JSON, nullable=False)
     classification = Column(String(30), nullable=False, default='Pendiente')
+
+
+class MailAccount(Base):
+    __tablename__ = 'mail_accounts'
+    id = Column(Integer, primary_key=True)
+    email = Column(String(254), nullable=False, unique=True)
+    encrypted_password = Column(Text)
+    active = Column(Boolean, nullable=False, default=False, index=True)
+    status = Column(String(40), nullable=False, default='disconnected')
+    last_error = Column(String(40))
+    imap_status = Column(String(40), nullable=False, default='not_checked')
+    smtp_status = Column(String(40), nullable=False, default='not_checked')
+    last_sync_at = Column(DateTime)
+    created_by_id = Column(ForeignKey('users.id'))
+    created_at = Column(DateTime, nullable=False, default=now)
+
+
+class MailSyncCursor(Base):
+    __tablename__ = 'mail_sync_cursors'
+    __table_args__ = (UniqueConstraint('account_id', 'folder', name='uq_mail_sync_account_folder'),)
+    id = Column(Integer, primary_key=True)
+    account_id = Column(ForeignKey('mail_accounts.id'), nullable=False, index=True)
+    folder = Column(String(80), nullable=False, default='INBOX')
+    uidvalidity = Column(String(32))
+    last_uid = Column(BigInteger, nullable=False, default=0)
+    activated_at = Column(DateTime, nullable=False, default=now)
+    last_synced_at = Column(DateTime)
+
+
+class MailMessage(Base):
+    __tablename__ = 'mail_messages'
+    __table_args__ = (
+        UniqueConstraint('account_id', 'folder', 'uidvalidity', 'uid', name='uq_mail_messages_account_uid'),
+        UniqueConstraint('account_id', 'message_id', name='uq_mail_messages_account_message_id'),
+        UniqueConstraint('account_id', 'content_hash', name='uq_mail_messages_account_content_hash'),
+        UniqueConstraint('send_key', name='uq_mail_messages_send_key'),
+        UniqueConstraint('retry_of_id', name='uq_mail_messages_retry_of'),
+        Index('ix_mail_messages_case_created', 'case_id', 'created_at'),
+        Index('ix_mail_messages_account_state', 'account_id', 'direction', 'status'),
+    )
+    id = Column(Integer, primary_key=True)
+    account_id = Column(ForeignKey('mail_accounts.id'), nullable=False, index=True)
+    case_id = Column(ForeignKey('cases.id'), index=True)
+    folder = Column(String(80))
+    uidvalidity = Column(String(32))
+    uid = Column(BigInteger)
+    message_id = Column(String(255))
+    content_hash = Column(String(64))
+    in_reply_to = Column(String(255))
+    references_json = Column(JSON, nullable=False, default=list)
+    thread_root = Column(String(255))
+    direction = Column(String(20), nullable=False)
+    status = Column(String(30), nullable=False, default='Pendiente')
+    send_key = Column(String(80))
+    retry_of_id = Column(ForeignKey('mail_messages.id'))
+    request_hash = Column(String(64))
+    sender = Column(String(254), nullable=False, default='')
+    to_addresses = Column(JSON, nullable=False, default=list)
+    cc_addresses = Column(JSON, nullable=False, default=list)
+    subject = Column(String(998), nullable=False, default='')
+    body_text = Column(Text, nullable=False, default='')
+    attachment_ids = Column(JSON, nullable=False, default=list)
+    error_code = Column(String(40))
+    smtp_accepted_at = Column(DateTime)
+    sent_copy_status = Column(String(30))
+    actor_id = Column(ForeignKey('users.id'))
+    created_at = Column(DateTime, nullable=False, default=now, index=True)
+    received_at = Column(DateTime)
+
+
+class MailAttachment(Base):
+    __tablename__ = 'mail_attachments'
+    id = Column(Integer, primary_key=True)
+    message_id = Column(ForeignKey('mail_messages.id'), nullable=False, index=True)
+    filename = Column(String(240), nullable=False)
+    mime = Column(String(100), nullable=False)
+    storage_key = Column(String(80), nullable=False, unique=True)
+    size = Column(Integer, nullable=False)
+    sha256 = Column(String(64), nullable=False)
 
 
 Index('ix_case_pool', Case.status, Case.owner_id)

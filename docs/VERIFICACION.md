@@ -45,3 +45,14 @@ Las nuevas revisiones `005_commercial_cancellation` y `006_cancelled_stage_snaps
 - El historico de llamadas/visitas se conserva como evento, aunque la interfaz nueva solo ofrece Notas, Correo y WhatsApp. No se envia correo/WhatsApp.
 
 La migracion 007 no se aplico a la base operativa `comgraf`, no se cambio su contenido ni sus adjuntos. Para actualizarla, respalda SQL y archivos, detiene Comgraf, ejecuta `scripts/update-local.ps1` y reinicia; la migracion deja todos los expedientes existentes Activos y permite tareas de recogida sin responsable. No ejecutes pruebas con `MYSQL_DATABASE=comgraf`.
+
+## Integración de correo Yahoo
+
+- Backend completo: 38 pruebas aprobadas con MySQL real aislado en `comgraf_test`. Correo: 9 pruebas aprobadas después del endurecimiento del corte por `INTERNALDATE`, incluido el caso de `UIDVALIDITY` nuevo cuando el servidor no entrega fecha interna.
+- `alembic check`: sin operaciones pendientes después de declarar en el modelo el índice `ix_partial_release_status_case`, ya creado por una migración anterior.
+- Frontend: ESLint y build de Vite correctos. Node 18 del entorno local mostró la advertencia de versión mínima de Vite; el build de la imagen, que utiliza Node 24, terminó correctamente.
+- `docker compose config --quiet`, compilación de Python y `git diff --check`: correctos. `docker compose build app`: correcto.
+- Los protocolos IMAP/SMTP se verificaron con transportes simulados; no se usaron credenciales ni se intentó iniciar sesión en Yahoo. El envío, recepción y carpeta Enviados reales quedan por comprobar cuando el administrador conecte su buzón desde **Configuración → Correo de la empresa**.
+- Las migraciones 010 y 011 se aplicaron solamente a `comgraf_test`. No se aplicaron a `comgraf`, ni se reinició el servicio activo. La imagen construida contiene el código nuevo, pero la instancia actual aún necesita el procedimiento de actualización documentado en `README.md`.
+
+La clave Fernet se crea al primer uso en `.runtime/mail-secrets/fernet.key` para ejecución local, con permisos de archivo restrictivos; Compose la conserva en el volumen `mail_secrets`. Guarda una copia protegida de esa clave junto al respaldo de MySQL y adjuntos, fuera del servidor. Sin esa clave no se puede descifrar la contraseña guardada al restaurar.

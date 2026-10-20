@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 os.environ['MYSQL_DATABASE'] = os.environ.get('TEST_MYSQL_DATABASE', 'comgraf_test')
-os.environ['UPLOAD_DIR'] = str(Path('../.runtime/test-uploads').resolve())
+os.environ['UPLOAD_DIR'] = os.environ.get('TEST_UPLOAD_DIR', str(Path('../.runtime/test-uploads').resolve()))
 from app.config import settings
 if not settings.mysql_database.endswith('_test'):
     raise RuntimeError('Las pruebas requieren una base terminada en _test')
@@ -31,6 +31,7 @@ def accounts(migrate):
     with engine.begin() as conn:
         conn.execute(text('UPDATE ledger SET reverses_id = NULL WHERE reverses_id IS NOT NULL'))
         conn.execute(text('UPDATE cases SET related_case_id = NULL WHERE related_case_id IS NOT NULL'))
+        conn.execute(text('UPDATE mail_messages SET retry_of_id = NULL WHERE retry_of_id IS NOT NULL'))
         for table in reversed(Base.metadata.sorted_tables):
             if table.name != 'roles': conn.execute(table.delete())
     credentials = {}

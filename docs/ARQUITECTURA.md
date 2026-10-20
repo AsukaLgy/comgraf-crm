@@ -62,6 +62,10 @@ Las capacidades de roles salvo Administrador son configurables. Varios roles acu
 
 Contraseñas Argon2id. Sesiones aleatorias, almacenadas como SHA256, cookie HttpOnly/SameSite Strict, revocables al salir o cambiar contraseña. Cada petición mutadora exige cabecera propia y origen coincidente; no se habilita CORS. Adjuntos identificados por UUID, descargados con autenticación, sin ruta pública. PDF/PNG/JPEG/TXT con límite, extensión y firma/UTF-8 comprobadas; no hay antivirus integrado.
 
+## Correo Yahoo
+
+El correo empresarial usa IMAP SSL/TLS en Yahoo para leer INBOX y SMTP SSL/TLS para enviar. `mail_accounts` conserva la contraseña solo cifrada con Fernet; su clave vive fuera de MySQL en `.runtime/mail-secrets/` o en el volumen Compose `mail_secrets`. Los respaldos deben incluir MySQL, adjuntos y una copia protegida de esa clave. `mail_sync_cursors` conserva UIDVALIDITY/UID por cuenta y carpeta; el trabajador adquiere `GET_LOCK` de MySQL antes de sincronizar o procesar salidas. La bandeja de salida persiste estados y claves idempotentes; un resultado incierto nunca se reenvía automáticamente. La aceptación SMTP no equivale a entrega ni lectura.
+
 ## Indicadores
 
 La pantalla explica sus denominadores: conversión de solicitudes a órdenes de producción sobre todas las solicitudes; aceptación sobre versiones; cotizaciones convertidas sobre versiones aceptadas; puntualidad sobre entregas completas contra compromiso original. Tiempo de primera respuesta cuenta primera interacción manual saliente o visita, no nota interna ni asignación. Tiempo por etapa incluye permanencia y bloqueos; tiempo bloqueado también se reporta aparte. El indicador Reclamos conserva el conteo de retrocesos de producción registrados con motivo.

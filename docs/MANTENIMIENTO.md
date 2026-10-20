@@ -21,7 +21,8 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 | Anulación comercial | `frontend/src/CasePage.jsx`, `DeliveryFinance.jsx`; `backend/app/services.py`, `repository.py` | Detener producción conservando entregas y movimientos; ajustar cargo final, resolver devoluciones o dejar revisión financiera pendiente. |
 | Ficha imprimible | `frontend/src/CasePrintSheet.jsx` | Salida de taller y especificaciones del expediente. |
 | Productos y conversión | `frontend/src/ProductForm.jsx` | Partidas, especificaciones, cotizaciones y ampliación del mismo caso a producción. |
-| Comunicación manual | `frontend/src/Composer.jsx` | Notas, interacciones y borradores locales/remotos; no envía mensajes externos. |
+| Correo Yahoo | `frontend/src/Settings.jsx`, `Composer.jsx`; `backend/app/routers/mail.py`, `mail_transport.py`, `mail_service.py`, `mail_security.py`, `mail_worker.py` | Configuración cifrada, cliente IMAP/SMTP, asociación de hilos, bandeja de salida idempotente y trabajador coordinado por MySQL. |
+| Comunicación manual | `frontend/src/Composer.jsx` | Notas y WhatsApp manuales; las notas internas nunca pasan a la bandeja de salida del correo. |
 | Endpoints | `backend/app/routers/` | HTTP, permisos de entrada, dependencias de sesión y traducción a servicios. |
 | Respuesta del expediente | `backend/app/routers/common.py` | Proyección común posterior a una mutación; evita que un router importe otro. |
 | Contratos | `backend/app/schemas.py` | Validación Pydantic. Rechaza campos extra y normaliza entradas. |

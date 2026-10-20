@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 Money = Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)]
 Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
@@ -288,6 +288,35 @@ class AdjustmentInput(Mutation):
 class DraftInput(Input):
     body: str = Field(max_length=20000)
     version: int = Field(ge=0)
+    email_to: str = Field(default='', max_length=1000)
+    email_subject: str = Field(default='', max_length=998)
+    email_attachment_ids: list[int] = Field(default_factory=list, max_length=20)
+    email_thread_root: str = Field(default='', max_length=255)
+
+
+class MailConfigurationInput(Input):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True, hide_input_in_errors=True)
+    email: str = Field(min_length=3, max_length=254)
+    application_password: SecretStr | None = Field(default=None, max_length=200)
+
+
+class MailSendInput(Input):
+    to: list[str] = Field(min_length=1, max_length=10)
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=20000)
+    attachment_ids: list[int] = Field(default_factory=list, max_length=20)
+    thread_root: str | None = Field(default=None, max_length=255)
+    send_key: str = Field(min_length=16, max_length=80, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
+class MailClassifyInput(Input):
+    action: Literal['link', 'reactivate', 'related', 'new', 'ignore']
+    case_id: int | None = None
+    client_id: int | None = None
+
+
+class MailRetryInput(Input):
+    confirm_uncertain: bool = False
 
 
 # ---- Preferencias de bandeja ----

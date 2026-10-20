@@ -17,8 +17,9 @@ export default function CaseActivity({ record, attention, user, person, onRefere
       )}
       {record.events.length ? (
         <ol className="timeline">
-          {[...record.events].reverse().map((event) => (
-            <li key={event.id} className={event.kind === 'Sistema' ? 'system' : ''}>
+          {[...record.events].reverse().map((event) => {
+            const email = event.data?.email_message_id && record.email_messages?.find((message) => message.id === event.data.email_message_id)
+            return <li key={event.id} className={event.kind === 'Sistema' ? 'system' : ''}>
               <span className="timeline-icon">
                 {event.kind === 'Sistema' ? <Clock size={14} /> : <MessageSquare size={14} />}
               </span>
@@ -55,10 +56,12 @@ export default function CaseActivity({ record, attention, user, person, onRefere
                     ) : null}
                   </p>
                 )}
-                {event.data.direction && <small>{event.data.direction} · Registro manual</small>}
+                {event.data.direction && <small>{event.data.direction}{email ? ' · Correo electrónico' : ' · Registro manual'}</small>}
+                {email?.attachments?.length > 0 && <div className="email-event-attachments">{email.attachments.map((attachment) => <a key={attachment.id} href={`/api/mail/attachments/${attachment.id}`}>{attachment.filename}</a>)}</div>}
+                {event.kind === 'Correo saliente' && email?.sent_copy_status && <small>Copia en Enviados: {email.sent_copy_status}. Aceptado por Yahoo; sin confirmación de entrega o lectura.</small>}
               </div>
             </li>
-          ))}
+          })}
         </ol>
       ) : (
         <Empty />
