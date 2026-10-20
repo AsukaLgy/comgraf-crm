@@ -66,6 +66,9 @@ export default function Composer({ record, user }) {
   const [template, setTemplate] = useState('')
   const [templateOpen, setTemplateOpen] = useState(false)
   const [templateValues, setTemplateValues] = useState({})
+  const pendingEmailMessages = (record.email_messages || []).filter((message) =>
+    message.direction === 'Entrante' && message.status === 'Vinculado' && !message.attended_at,
+  )
   const mailStatus = useQuery({ queryKey: ['mail-status'], queryFn: () => api('/mail/status'), enabled: channel === 'Correo', staleTime: 30000 })
   const outbox = useQuery({
     queryKey: ['mail-outbox', outgoingId],
@@ -216,6 +219,26 @@ export default function Composer({ record, user }) {
     }
   }
 
+  async function attendVisibleEmails() {
+    const messageIds = pendingEmailMessages.map((message) => message.id)
+    if (!messageIds.length) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api(`/cases/${record.id}/email/attend`, { method: 'POST', body: { message_ids: messageIds } })
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['case', String(record.id)] }),
+        qc.invalidateQueries({ queryKey: ['counts'] }),
+        qc.invalidateQueries({ queryKey: ['cases'] }),
+      ])
+      setSaved('Correos seleccionados marcados como atendidos')
+    } catch (cause) {
+      setError(cause)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   useEffect(() => {
     if (outbox.data?.status !== 'Aceptado por Yahoo' || sentSnapshot?.id !== outbox.data.id || acceptedHandled.current === outbox.data.id) return
     acceptedHandled.current = outbox.data.id
@@ -266,6 +289,10 @@ export default function Composer({ record, user }) {
 
   return (
     <form className="composer" onSubmit={send}>
+      {pendingEmailMessages.length > 0 && <div className="notice warning email-attendance">
+        <span>{pendingEmailMessages.length} correo(s) entrante(s) siguen pendientes de atención.</span>
+        <button type="button" disabled={busy} onClick={attendVisibleEmails}>Marcar estos correos como atendidos</button>
+      </div>}
       <div className="tabs" role="tablist" aria-label="Canal de comunicación">
         {CHANNELS.map((name) => (
           <button
@@ -374,6 +401,8 @@ export default function Composer({ record, user }) {
       </div>
       {outbox.data && <div className={`mail-send-result ${outbox.data.status === 'Error' || outbox.data.status === 'Resultado incierto' ? 'warning' : ''}`} role="status">
         <strong>{outbox.data.status}</strong>
+        {outbox.data.status === 'Pendiente' && <p>{outbox.data.error_code ? 'Yahoo no respondió temporalmente. Comgraf reintentará el envío; el correo y sus adjuntos se conservan.' : 'El correo espera en la cola de salida.'}</p>}
+        {outbox.data.status === 'Enviando' && <p>Comgraf está enviando el correo a Yahoo.</p>}
         {outbox.data.status === 'Aceptado por Yahoo' && <p>Yahoo aceptó el mensaje. No hay evidencia de que el destinatario lo haya recibido o leído. Copia en Enviados: {outbox.data.sent_copy_status || 'pendiente'}.</p>}
         {outbox.data.status === 'Aceptado por Yahoo' && outbox.data.sent_copy_status === 'Error' && <button type="button" onClick={retrySentCopy} disabled={busy}>Reintentar solo la copia en Enviados</button>}
         {outbox.data.status === 'Aceptado por Yahoo' && <button type="button" onClick={startAnotherEmail}>Iniciar otro correo</button>}

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, can } from './api'
-import { Badge, ErrorBox, Field, FormDialog, Loading, Panel, Select } from './components'
+import { Badge, ErrorBox, Field, FormDialog, Loading, Panel } from './components'
 
 const ROLES = ['Administrador', 'Coordinador', 'Atención', 'Producción', 'Cobranza', 'Escáner de encuadernación']
 
@@ -30,7 +30,6 @@ export default function Settings({ user }) {
     </>}
     {can(user, '*') && <MailCompanyConfig user={user}/>}
     <Panel title="WhatsApp"><h3>WhatsApp <Badge>No configurado</Badge></h3><p>Se conservan los borradores y el registro manual. Esta conexión todavía no envía mensajes.</p></Panel>
-    {(can(user, 'attention') || can(user, '*')) && <PendingEmailClassification user={user}/>}
     <Panel title="Instalación"><p>Zona horaria: <strong>{user.timezone}</strong></p><p>Datos compartidos en MySQL. Adjuntos almacenados en el servidor. Los respaldos deben incluir ambos.</p></Panel>
 
     {modal?.type === 'user' && <FormDialog title={modal.user ? 'Editar usuario' : 'Crear usuario'} initial={modal.user ? { name: modal.user.name, roles: modal.user.roles, active: modal.user.active, capacity: modal.user.capacity, password: '' } : { username: '', name: '', password: '', roles: ['Atención'], capacity: 20 }} onClose={() => setModal(null)} onSave={async (value) => { const body = { ...value, capacity: Number(value.capacity) }; if (modal.user && !body.password) body.password = null; await api('/users' + (modal.user ? '/' + modal.user.id : ''), { method: modal.user ? 'PUT' : 'POST', body }); qc.invalidateQueries({ queryKey: ['users'] }) }} render={(value, set) => <>
@@ -49,7 +48,13 @@ function MailCompanyConfig({ user }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
+  const [testId, setTestId] = useState(null)
   const [busy, setBusy] = useState(false)
+  const testStatus = useQuery({
+    queryKey: ['mail-test', testId], queryFn: () => api(`/mail/test/${testId}`),
+    enabled: Boolean(testId), refetchInterval: (query) => ['Pendiente', 'Enviando'].includes(query.state.data?.status)
+      || (query.state.data?.status === 'Aceptado por Yahoo' && ['Pendiente', 'Enviando'].includes(query.state.data?.sent_copy_status)) ? 1500 : false,
+  })
   const emailValue = email ?? mail.data?.email ?? ''
 
   async function save(event) {
@@ -57,6 +62,7 @@ function MailCompanyConfig({ user }) {
     setBusy(true)
     setError(null)
     setResult(null)
+    setTestId(null)
     try {
       const response = await api('/mail/config', {
         method: 'PUT',
@@ -79,8 +85,12 @@ function MailCompanyConfig({ user }) {
     setBusy(true)
     setError(null)
     setResult(null)
+    setTestId(null)
     try {
-      setResult({ test: await api('/mail/test', { method: 'POST', body: {} }) })
+      const sendKey = `test-${window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`
+      const queued = await api('/mail/test', { method: 'POST', body: { send_key: sendKey } })
+      setResult({ test: queued })
+      setTestId(queued.id)
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['mail-config'] }),
         qc.invalidateQueries({ queryKey: ['mail-status'] }),
@@ -133,15 +143,32 @@ function MailCompanyConfig({ user }) {
       <strong>{result.saved ? 'Configuración guardada.' : 'No se reemplazó la configuración actual.'}</strong>
       <p>IMAP: {tested.imap.ok ? 'Conectado' : mailStatusLabel(tested.imap.status)} · SMTP: {tested.smtp.ok ? 'Conectado' : mailStatusLabel(tested.smtp.status)}</p>
       {!tested.imap.ok && tested.imap.operation && <p>Operación IMAP: {tested.imap.operation}{tested.imap.cause_type ? ` · ${tested.imap.cause_type}` : ''}</p>}
+      {!tested.smtp.ok && tested.smtp.operation && <p>Operación SMTP: {tested.smtp.operation}{tested.smtp.cause_type ? ` · ${tested.smtp.cause_type}` : ''}</p>}
     </div>}
-    {result?.test && <div className="notice" role="status">{result.test.sent ? `Prueba aceptada por Yahoo. Copia en Enviados: ${result.test.sent_copy_status}.` : `Falló SMTP: ${result.test.smtp_label}.`}</div>}
+    {result?.test && <div className="notice" role="status">
+      {!testStatus.data && 'Prueba guardada en la cola de salida.'}
+      {testStatus.data?.status === 'Pendiente' && !testStatus.data.error_code && 'Prueba en cola para envío.'}
+      {testStatus.data?.status === 'Pendiente' && testStatus.data.error_code && 'Yahoo no respondió temporalmente. Comgraf reintentará el envío y conservará su estado.'}
+      {testStatus.data?.status === 'Enviando' && 'Yahoo está procesando la prueba.'}
+      {testStatus.data?.status === 'Aceptado por Yahoo' && `Yahoo aceptó la prueba. Esto no confirma entrega ni lectura. Copia en Enviados: ${testStatus.data.sent_copy_status || 'pendiente'}.`}
+      {testStatus.data?.status === 'Error' && `Falló SMTP: ${mailStatusLabel(testStatus.data.error_code)}. No se esperó a IMAP.`}
+      {testStatus.data?.status === 'Resultado incierto' && 'El resultado SMTP es incierto. Revisa Yahoo antes de decidir un nuevo envío.'}
+      {testStatus.error && <ErrorBox error={testStatus.error}/>}
+    </div>}
     {state?.smtp_ready && !state?.configured && <div className="notice">SMTP está disponible para enviar. La recepción IMAP presenta un problema; revisa su estado antes de depender de la bandeja de entrada.</div>}
     {(state?.configured || state?.has_password || state?.last_sync_at) && <div className="profile-grid">
       <p>IMAP: <strong>{state.imap_label}</strong></p><p>SMTP: <strong>{state.smtp_label}</strong></p>
       <p>Sincronizador: <strong>{state.worker_label || 'Estado desconocido'}</strong></p>
       {state.last_error_label && <p>Último diagnóstico: <strong>{state.last_error_label}</strong></p>}
       <p>Última sincronización correcta: <strong>{state.last_sync_at ? new Date(state.last_sync_at).toLocaleString('es-HN', { timeZone: user.timezone }) : 'Aún no realizada'}</strong></p>
-      <p>Se consulta INBOX aproximadamente cada minuto. Los correos anteriores al momento de conexión no se importan.</p>
+      <p>INBOX se consulta aproximadamente cada minuto. La cola SMTP y la copia en Enviados se ejecutan por separado, sin esperar la recepción. Los correos anteriores al momento de conexión no se importan.</p>
+      <div className="mail-task-grid">{(state.worker_tasks || []).map((task) => <article key={task.task}>
+        <strong>{({inbox:'Recepción IMAP',outbox:'Salida SMTP',sent_copy:'Copia en Enviados'})[task.task] || task.task}</strong>
+        <span>Latido: {task.heartbeat_at ? new Date(task.heartbeat_at).toLocaleTimeString('es-HN', {timeZone:user.timezone}) : 'sin dato'}</span>
+        <span>Último intento: {task.last_attempt_at ? new Date(task.last_attempt_at).toLocaleString('es-HN', {timeZone:user.timezone}) : 'sin dato'}</span>
+        <span>Último éxito: {task.last_success_at ? new Date(task.last_success_at).toLocaleString('es-HN', {timeZone:user.timezone}) : 'sin dato'}</span>
+        {task.last_error_label && <span className="mail-task-error">Último error: {task.last_error_label}</span>}
+      </article>)}</div>
     </div>}
     {state?.worker_status === 'worker_stale' && <div className="notice warning" role="status">El buzón se puede autenticar, pero el sincronizador no registra una consulta correcta reciente. Revisa los registros del servicio Comgraf.</div>}
   </Panel>
@@ -154,52 +181,13 @@ function mailStatusLabel(code) {
     tls_error: 'Error de TLS/certificado', inbox_select_error: 'Error al abrir INBOX',
     inbox_query_error: 'Error al consultar INBOX', inbox_metadata_error: 'Error en metadatos de INBOX',
     message_fetch_error: 'Error al descargar mensaje', message_processing_error: 'Error al procesar mensaje',
-    persistence_error: 'Error al guardar correo',
+    recipient_rejected: 'Yahoo rechazó el destinatario', smtp_rejected: 'Yahoo rechazó el contenido de salida',
+    worker_stale: 'Trabajador sin actividad reciente',
+    internaldate_unavailable: 'Hay mensajes cuya fecha de Yahoo no puede determinarse; requieren revisión',
+    message_content_missing: 'Mensaje pendiente de volver a descargar',
+    message_metadata_missing: 'Metadatos del mensaje pendientes', message_size_unavailable: 'Tamaño del mensaje pendiente',
+    sent_copy_error: 'Error al guardar copia en Enviados', worker_internal_error: 'Error interno del trabajador',
+    persistence_error: 'Error al guardar correo', key_unavailable: 'No está disponible la clave cifrada',
+    account_disconnected: 'Buzón desconectado', worker_lock_held: 'Otra instancia procesa esta tarea',
   })[code] || 'Error de conexión'
-}
-
-function PendingEmailClassification() {
-  const qc = useQueryClient()
-  const pending = useQuery({ queryKey: ['mail-pending'], queryFn: () => api('/mail/pending'), refetchInterval: 30000 })
-  const [selection, setSelection] = useState({})
-  const [busyId, setBusyId] = useState(null)
-  const [error, setError] = useState(null)
-  async function classify(message, action) {
-    const choice = selection[message.id] || {}
-    setBusyId(message.id)
-    setError(null)
-    try {
-      await api(`/mail/pending/${message.id}/classify`, {
-        method: 'POST', body: { action, case_id: Number(choice.case_id) || null, client_id: Number(choice.client_id) || null },
-      })
-      await qc.invalidateQueries({ queryKey: ['mail-pending'] })
-      await qc.invalidateQueries({ queryKey: ['counts'] })
-    } catch (cause) {
-      setError(cause)
-    } finally {
-      setBusyId(null)
-    }
-  }
-  return <Panel title="Correos por clasificar" action={<Badge>{pending.data?.length || 0}</Badge>}>
-    <p>Los remitentes ambiguos, respuestas a solicitudes completadas y referencias dudosas esperan aquí antes de entrar a la bitácora.</p>
-    <ErrorBox error={pending.error || error}/>
-    {pending.data?.map((message) => <article className="mail-review" key={message.id}>
-      <strong>{message.subject || '(sin asunto)'}</strong><p>{message.sender} · {message.status}</p><pre>{message.body_text}</pre>
-      {message.attachments?.map((attachment) => <a key={attachment.id} href={`/api/mail/attachments/${attachment.id}`}>{attachment.filename}</a>)}
-      <div className="form-grid">
-        {message.clients?.length > 0 && <Select label="Cliente" options={message.clients.map((client) => ({ value: client.id, label: `${client.name}${client.company ? ` · ${client.company}` : ''}` }))} value={selection[message.id]?.client_id || ''} onChange={(event) => setSelection((current) => ({ ...current, [message.id]: { ...current[message.id], client_id: event.target.value } }))}/>}
-        {message.candidate_cases?.length > 0 && <Select label="Solicitud relacionada" empty="Seleccionar solicitud" options={message.candidate_cases.map((entry) => ({ value: entry.id, label: `${entry.number} · ${entry.subject} · ${entry.lifecycle}` }))} value={selection[message.id]?.case_id || message.candidate_case_id || ''} onChange={(event) => setSelection((current) => ({ ...current, [message.id]: { ...current[message.id], case_id: event.target.value } }))}/>}
-      </div>
-      <div className="form-actions">
-        <button disabled={busyId === message.id || !selection[message.id]?.client_id} onClick={() => classify(message, 'new')}>Crear solicitud para cliente</button>
-        {(message.candidate_cases?.length > 0 || message.candidate_case_id) && <>
-          <button disabled={busyId === message.id} onClick={() => classify(message, 'link')}>Asociar a solicitud activa</button>
-          <button disabled={busyId === message.id} onClick={() => classify(message, 'reactivate')}>Reactivar y asociar</button>
-          <button disabled={busyId === message.id} onClick={() => classify(message, 'related')}>Crear solicitud relacionada</button>
-        </>}
-        <button disabled={busyId === message.id} onClick={() => classify(message, 'ignore')}>Ignorar este correo</button>
-      </div>
-    </article>)}
-    {!pending.isPending && !pending.data?.length && <p className="muted">No hay correos pendientes de clasificación.</p>}
-  </Panel>
 }

@@ -18,7 +18,10 @@ def normalize(value):
 
 
 def client_search_text(client, contacts=()):
-    return normalize(' '.join([client.name, client.company, client.rtn, *(client.phones or []), *(client.emails or []), *[f'{contact.name} {contact.phone} {contact.email}' for contact in contacts]]))
+    values = [client.name, client.company, client.rtn, *(client.phones or []), *(client.emails or [])]
+    for contact in contacts:
+        values.extend((contact.name, contact.phone, contact.email))
+    return normalize(' '.join(str(value) for value in values if value))
 
 
 def today():
@@ -286,6 +289,8 @@ def case_detail(db, user, case, production_id=None):
             'thread_root': message.thread_root, 'created_at': message.created_at.replace(tzinfo=timezone.utc).isoformat(),
             'received_at': message.received_at.replace(tzinfo=timezone.utc).isoformat() if message.received_at else None,
             'error_code': message.error_code, 'sent_copy_status': message.sent_copy_status,
+            'attended_at': message.attended_at.replace(tzinfo=timezone.utc).isoformat() if message.attended_at else None,
+            'attended_by_id': message.attended_by_id,
             'attachments': [{'id': attachment.id, 'filename': attachment.filename, 'mime': attachment.mime, 'size': attachment.size} for attachment in attachments],
         })
     return result

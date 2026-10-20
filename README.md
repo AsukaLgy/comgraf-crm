@@ -113,7 +113,23 @@ En **Configuración → Correo de la empresa**, un administrador conecta Yahoo c
 
 Desde una solicitud se pueden guardar borradores, elegir destinatario y adjuntos del expediente, y enviar correo. El CRM muestra estados de cola, aceptación SMTP, error o resultado incierto. “Aceptado por Yahoo” no significa entregado ni leído. Los reintentos con resultado incierto requieren revisar el buzón y confirmarlos manualmente. WhatsApp sigue siendo manual. Los borradores se guardan por solicitud/canal/usuario en MySQL y el navegador conserva un respaldo provisional de la escritura.
 
-Las migraciones aditivas `010_yahoo_mail` y `011_mail_retry_idempotency` agregan configuración cifrada, progreso IMAP, mensajes, adjuntos y salida idempotente; no reconstruyen la base. Antes de actualizar, respalda MySQL y adjuntos. En Compose, `app.start` aplica las migraciones y levanta un trabajador coordinado por bloqueo MySQL para evitar sincronizadores duplicados. La integración necesita una conexión saliente a Yahoo; el CRM local sigue abriendo si Internet no está disponible. La conexión real se valida al configurar el buzón desde la pantalla de administración.
+Las migraciones aditivas `010_yahoo_mail`, `011_mail_retry_idempotency` y `013_mail_reliability` agregan configuración cifrada, progreso IMAP, mensajes, adjuntos, salida idempotente, resultados recuperables de cada UID, latidos y asistencia explícita de mensajes; no reconstruyen la base. `012_cai_order_snapshot` agrega la instantánea comercial de órdenes. Antes de actualizar, respalda MySQL y adjuntos. En Compose, `app.start` aplica las migraciones y supervisa un trabajador con tareas independientes para recepción IMAP, salida SMTP y copia en Enviados; bloqueos MySQL evitan tareas duplicadas aunque haya varios procesos web. La integración necesita una conexión saliente a Yahoo; el CRM local sigue abriendo si Internet no está disponible. La conexión real se valida al configurar el buzón desde la pantalla de administración.
+
+La cola SMTP se consulta cada 2 segundos y la copia de Enviados tiene su propio ciclo; una falla o espera IMAP no pausa esas tareas. INBOX se consulta aproximadamente cada minuto. En **Correos por clasificar** se ven mensajes sin asociación y UID que requieren reintento o revisión. Los reintentos de red SMTP son limitados y usan la contraseña guardada; un resultado incierto queda para revisión explícita. Un mensaje importado queda pendiente hasta que el usuario marque los mensajes concretos que atendió.
+
+Para investigar un rango acotado de UID que quizá se omitió, primero respalda la base y ejecuta una vista previa de hasta 100 UID, sin modificar el cursor ni importar el buzón completo:
+
+```sh
+docker compose exec app python -m app.mail_recovery --start-uid 424900 --end-uid 424914
+```
+
+Solo si la vista previa identifica mensajes posteriores al punto de activación que quieres recuperar, aplica los UID exactos mostrados:
+
+```sh
+docker compose exec app python -m app.mail_recovery --start-uid 424900 --end-uid 424914 --apply --uids 424913
+```
+
+La herramienta vuelve a comprobar UIDVALIDITY, deduplica por UID/Message-ID, toma el mismo bloqueo de la recepción normal y deja intactos mensajes anteriores a la activación. Sustituye el ejemplo por el rango y UID de la vista previa. Nunca uses `--apply` sin revisar primero el resultado.
 
 La migración `012_cai_order_snapshot` agrega a cada orden una referencia opcional al contacto y una instantánea de los datos comerciales usados al crearla. Las órdenes anteriores conservan sus datos; no se convierten talonarios históricos al producto CAI ni se inventan instantáneas retroactivas.
 
@@ -132,7 +148,7 @@ El actualizador comprueba la configuración, instala dependencias solo si cambia
 
 Las migraciones `005_commercial_cancellation` y `006_cancelled_stage_snapshot` agregan trazabilidad y marcan anulaciones existentes para revisión; no cambian pagos, saldos ni etapas sin clasificar, y no se editan después de aplicadas. Las anulaciones antiguas requieren revisión explícita; no se ponen en cero automáticamente.
 
-Con Docker, después del respaldo: `docker compose build app` y `docker compose up -d app`. El arranque aplica Alembic antes de servir solicitudes e inicia el trabajador Yahoo separado del servidor web. Comprueba `docker compose ps`, `/api/health`, login, expediente y descarga de archivo. Para instalar cambios sin Docker, usa el script Windows indicado arriba o ejecuta manualmente los pasos de Desarrollo sin Docker. Crea revisiones Alembic nuevas; no edites migraciones aplicadas. `alembic check` detecta diferencias entre modelos y esquema.
+Con Docker, después del respaldo: `docker compose build app` y `docker compose up -d app`. El arranque aplica Alembic antes de servir solicitudes y supervisa el trabajador Yahoo, que separa recepción, envío y copia en Enviados. Comprueba `docker compose ps`, `/api/health`, login, expediente y descarga de archivo; en Configuración revisa el latido y último éxito de cada tarea. Para instalar cambios sin Docker, usa el script Windows indicado arriba o ejecuta manualmente los pasos de Desarrollo sin Docker. Crea revisiones Alembic nuevas; no edites migraciones aplicadas. `alembic check` detecta diferencias entre modelos y esquema.
 
 ## Respaldo y restauración de Compose
 

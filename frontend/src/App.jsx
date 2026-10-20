@@ -17,6 +17,7 @@ import {
   LogOut,
   Layers,
   ClipboardCheck,
+  Mail,
 } from 'lucide-react'
 import { api, can, setTimezone, API_CONTRACT_VERSION, PRODUCT_VERSION } from './api'
 import { ErrorBox, Loading, Field } from './components'
@@ -26,6 +27,7 @@ import Clients from './Clients'
 import { Calendar, Indicators } from './Reports'
 import Settings from './Settings'
 import PartialReleaseApprovals from './PartialReleaseApprovals'
+import MailInbox from './MailInbox'
 
 const BindingScanner = lazy(() => import('./BindingScanner'))
 
@@ -124,6 +126,7 @@ export default function App() {
     [logoutError, setLogoutError] = useState(null)
   const me = useQuery({ queryKey: ['me'], queryFn: () => api('/auth/me'), retry: false })
   const serverVersion = useQuery({ queryKey: ['server-version'], queryFn: () => api('/version'), staleTime: 60000 })
+  const mailOverview = useQuery({ queryKey: ['mail-overview'], queryFn: () => api('/mail/overview'), enabled: can(me.data, 'attention') || can(me.data, '*'), refetchInterval: 15000, retry: false })
   useEffect(() => {
     if (me.data?.timezone) setTimezone(me.data.timezone)
   }, [me.data?.timezone])
@@ -142,6 +145,7 @@ export default function App() {
     ['/', 'Mi día', LayoutDashboard],
     ['/inbox/pool', 'Pool general', InboxIcon],
     ['/inbox/mine', 'Mis solicitudes', FolderOpen],
+    ...((can(user, 'attention') || can(user, '*')) ? [['/mail', 'Correos por clasificar', Mail]] : []),
     ...(can(user, 'clients') ? [['/clients', 'Clientes', Users]] : []),
     ['/inbox/production', 'Producción', Printer],
     ['/inbox/ready', 'Entregas y cobros', Truck],
@@ -182,6 +186,7 @@ export default function App() {
             <NavLink key={path} to={path} end={path === '/' || path === '/clients'}>
               <Icon size={18} />
               {label}
+              {path === '/mail' && <span className="nav-badge" aria-label={`${mailOverview.data?.unclassified ?? 0} correos por clasificar`}>{mailOverview.data?.unclassified ?? 0}</span>}
             </NavLink>
           ))}
         </nav>
@@ -258,6 +263,7 @@ export default function App() {
               }
             />
             <Route path="/calendar" element={<Calendar />} />
+            <Route path="/mail" element={<Guard user={user} permission="attention"><MailInbox/></Guard>} />
             <Route path="/binding-releases" element={<Guard user={user} permission="partial_release_approve"><PartialReleaseApprovals/></Guard>} />
             <Route
               path="/indicators"

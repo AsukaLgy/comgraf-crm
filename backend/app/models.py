@@ -333,6 +333,35 @@ class MailSyncCursor(Base):
     last_uid = Column(BigInteger, nullable=False, default=0)
     activated_at = Column(DateTime, nullable=False, default=now)
     last_synced_at = Column(DateTime)
+    recovery_scan = Column(Boolean, nullable=False, default=False)
+
+
+class MailWorkerTask(Base):
+    __tablename__ = 'mail_worker_tasks'
+    task_name = Column(String(30), primary_key=True)
+    account_id = Column(ForeignKey('mail_accounts.id'))
+    heartbeat_at = Column(DateTime)
+    last_attempt_at = Column(DateTime)
+    last_success_at = Column(DateTime)
+    last_error = Column(String(40))
+
+
+class MailSyncOutcome(Base):
+    __tablename__ = 'mail_sync_outcomes'
+    __table_args__ = (
+        UniqueConstraint('account_id', 'folder', 'uidvalidity', 'uid', name='uq_mail_sync_outcome_uid'),
+        Index('ix_mail_sync_outcomes_retry', 'account_id', 'outcome', 'last_attempt_at'),
+    )
+    id = Column(Integer, primary_key=True)
+    account_id = Column(ForeignKey('mail_accounts.id'), nullable=False, index=True)
+    folder = Column(String(80), nullable=False, default='INBOX')
+    uidvalidity = Column(String(32), nullable=False)
+    uid = Column(BigInteger, nullable=False)
+    outcome = Column(String(24), nullable=False, default='retry')
+    reason = Column(String(48))
+    attempts = Column(Integer, nullable=False, default=0)
+    last_attempt_at = Column(DateTime, nullable=False, default=now)
+    resolved_at = Column(DateTime)
 
 
 class MailMessage(Base):
@@ -345,6 +374,9 @@ class MailMessage(Base):
         UniqueConstraint('retry_of_id', name='uq_mail_messages_retry_of'),
         Index('ix_mail_messages_case_created', 'case_id', 'created_at'),
         Index('ix_mail_messages_account_state', 'account_id', 'direction', 'status'),
+        Index('ix_mail_outbox_due', 'account_id', 'direction', 'status', 'send_next_attempt_at'),
+        Index('ix_mail_copy_due', 'account_id', 'direction', 'status', 'sent_copy_status', 'copy_next_attempt_at'),
+        Index('ix_mail_attendance', 'case_id', 'direction', 'status', 'attended_at'),
     )
     id = Column(Integer, primary_key=True)
     account_id = Column(ForeignKey('mail_accounts.id'), nullable=False, index=True)
@@ -371,6 +403,14 @@ class MailMessage(Base):
     error_code = Column(String(40))
     smtp_accepted_at = Column(DateTime)
     sent_copy_status = Column(String(30))
+    send_attempts = Column(Integer, nullable=False, default=0)
+    send_next_attempt_at = Column(DateTime)
+    processing_started_at = Column(DateTime)
+    copy_attempts = Column(Integer, nullable=False, default=0)
+    copy_next_attempt_at = Column(DateTime)
+    copy_started_at = Column(DateTime)
+    attended_at = Column(DateTime)
+    attended_by_id = Column(ForeignKey('users.id'))
     actor_id = Column(ForeignKey('users.id'))
     created_at = Column(DateTime, nullable=False, default=now, index=True)
     received_at = Column(DateTime)

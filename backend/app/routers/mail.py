@@ -7,6 +7,7 @@ from email.utils import make_msgid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy import func
 
 from .. import schemas as s, services as service
 from ..db import SessionLocal, get_db
@@ -15,8 +16,9 @@ from ..mail_service import (
     account_projection, clean_address, pause_outbox_for_account, retry_sent_copy, unclassified_messages,
     _message_public,
 )
-from ..mail_transport import append_sent_copy, check_credentials, send_test_mail, status_label
-from ..models import Attachment, Case, Client, Event, MailAccount, MailAttachment, MailMessage, MailSyncCursor, Role, now
+from ..mail_transport import append_sent_copy, check_credentials, status_label
+from ..models import (Attachment, Case, Client, Event, MailAccount, MailAttachment, MailMessage,
+                      MailSyncCursor, MailSyncOutcome, Role, now)
 from ..repository import get_case, row
 from ..security import can, current_user, require
 from ..mail_transport import MailFailure
@@ -125,30 +127,45 @@ def save_mail_config(data: s.MailConfigurationInput, user=Depends(current_user),
         # The checkpoint is committed now, before the worker starts, so the initial inbox is not imported.
         checkpoint = result['imap']['checkpoint']
         cursor = MailSyncCursor(account_id=account.id, folder='INBOX', uidvalidity=checkpoint['uidvalidity'],
-            last_uid=checkpoint['last_uid'], activated_at=now(), last_synced_at=None)
+            last_uid=checkpoint['last_uid'], activated_at=checkpoint.get('checked_at') or now(), last_synced_at=None)
         db.add(cursor)
     account.last_sync_at = cursor.last_synced_at
     return {'saved': True, 'connection': result, 'account': account_projection(account, db)}
 
 
-@router.post('/mail/test')
-def mail_test(user=Depends(current_user), db=Depends(get_db, scope='function')):
+@router.post('/mail/test', status_code=202)
+def mail_test(data: s.MailTestInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require_admin(db, user)
-    account = _current_account(db)
+    account = _current_account(db, lock=True)
     if not account or not account.encrypted_password:
         raise HTTPException(409, 'Configura primero el buzón Yahoo')
-    password = decrypt_password(account.encrypted_password)
-    try:
-        payload = send_test_mail(account.email, password)
-        match = re.search(rb'^Message-ID: (.+)$', payload, re.MULTILINE)
-        copy_status = append_sent_copy(account.email, password, match.group(1).decode().strip() if match else '', payload)
-    except Exception as exc:
-        code = getattr(exc, 'code', 'connection_error')
-        account.status = code if code in {'authentication_error', 'connection_error'} else 'connection_error'
-        account.smtp_status = account.status
-        account.last_error = account.status
-        return {'sent': False, 'smtp_status': account.smtp_status, 'smtp_label': status_label(account.smtp_status)}
-    return {'sent': True, 'smtp_status': 'connected', 'smtp_label': status_label('connected'), 'sent_copy_status': copy_status}
+    if account.smtp_status != 'connected':
+        raise HTTPException(409, 'SMTP no está conectado; comprueba la conexión antes de enviar la prueba')
+    send_key = 'test:' + data.send_key
+    existing = db.scalar(select(MailMessage).where(MailMessage.send_key == send_key))
+    if existing:
+        return {'id': existing.id, 'status': existing.status, 'sent_copy_status': existing.sent_copy_status, 'queued': existing.status == 'Pendiente'}
+    message_id = make_msgid(domain=account.email.rsplit('@', 1)[-1])
+    message = MailMessage(
+        account_id=account.id, direction='Saliente', status='Pendiente', send_key=send_key,
+        request_hash=hashlib.sha256(b'comgraf-mail-test-v1').hexdigest(), sender=account.email,
+        to_addresses=[account.email], cc_addresses=[], subject='Prueba de conexión · Comgraf',
+        body_text='Este mensaje confirma que Comgraf pudo enviar correo mediante Yahoo SMTP. La aceptación SMTP no confirma entrega ni lectura.',
+        attachment_ids=[], thread_root=message_id, message_id=message_id, actor_id=user.id, created_at=now(),
+    )
+    db.add(message)
+    db.flush()
+    return {'id': message.id, 'status': message.status, 'sent_copy_status': None, 'queued': True}
+
+
+@router.get('/mail/test/{message_id}')
+def mail_test_status(message_id: int, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    require_admin(db, user)
+    message = db.get(MailMessage, message_id)
+    if not message or message.direction != 'Saliente' or not message.send_key or not message.send_key.startswith('test:'):
+        raise HTTPException(404, 'Prueba de correo no encontrada')
+    return {'id': message.id, 'status': message.status, 'error_code': message.error_code,
+            'sent_copy_status': message.sent_copy_status, 'smtp_accepted_at': message.smtp_accepted_at.isoformat() + 'Z' if message.smtp_accepted_at else None}
 
 
 @router.delete('/mail/config')
@@ -177,6 +194,20 @@ def _normalize_recipients(addresses):
     if not result:
         raise HTTPException(422, 'Ingresa al menos un destinatario')
     return result
+
+
+def _resolve_sync_outcome(db, message, outcome, reason):
+    if not message.uid or not message.uidvalidity or not message.folder:
+        return
+    row = db.scalar(select(MailSyncOutcome).where(
+        MailSyncOutcome.account_id == message.account_id, MailSyncOutcome.folder == message.folder,
+        MailSyncOutcome.uidvalidity == message.uidvalidity, MailSyncOutcome.uid == message.uid,
+    ).with_for_update())
+    if row:
+        row.outcome = outcome
+        row.reason = reason
+        row.resolved_at = now()
+        row.last_attempt_at = now()
 
 
 def _require_case_editor(db, user, case):
@@ -306,6 +337,77 @@ def pending_mail(user=Depends(current_user), db=Depends(get_db, scope='function'
     return unclassified_messages(db)
 
 
+@router.get('/mail/overview')
+def mail_overview(user=Depends(current_user), db=Depends(get_db, scope='function')):
+    require(db, user, 'attention')
+    account = _current_account(db)
+    if not account:
+        return {'received': 0, 'unclassified': 0, 'ignored': 0, 'errors': 0, 'sync_pending': 0}
+    incoming = MailMessage.direction == 'Entrante'
+    unclassified = MailMessage.status.in_([
+        'Pendiente de clasificación', 'Coincidencia ambigua', 'Referencia ambigua',
+        'Participante no reconocido', 'Solicitud no disponible', 'Error de análisis',
+    ])
+    return {
+        'received': db.scalar(select(func.count(MailMessage.id)).where(MailMessage.account_id == account.id, incoming, MailMessage.status == 'Vinculado')) or 0,
+        'unclassified': db.scalar(select(func.count(MailMessage.id)).where(MailMessage.account_id == account.id, incoming, unclassified)) or 0,
+        'ignored': db.scalar(select(func.count(MailMessage.id)).where(MailMessage.account_id == account.id, incoming, MailMessage.status == 'Ignorado')) or 0,
+        'errors': db.scalar(select(func.count(MailSyncOutcome.id)).where(MailSyncOutcome.account_id == account.id,
+            MailSyncOutcome.outcome.in_(['retry', 'review']))) or 0,
+        'sync_pending': db.scalar(select(func.count(MailSyncOutcome.id)).where(MailSyncOutcome.account_id == account.id,
+            MailSyncOutcome.outcome == 'retry')) or 0,
+    }
+
+
+@router.get('/mail/issues')
+def mail_sync_issues(user=Depends(current_user), db=Depends(get_db, scope='function')):
+    require(db, user, 'attention')
+    account = _current_account(db)
+    if not account:
+        return []
+    rows = db.scalars(select(MailSyncOutcome).where(
+        MailSyncOutcome.account_id == account.id, MailSyncOutcome.outcome.in_(['retry', 'review']),
+    ).order_by(MailSyncOutcome.last_attempt_at.desc(), MailSyncOutcome.uid).limit(100)).all()
+    return [{'uid': row.uid, 'uidvalidity': row.uidvalidity, 'state': row.outcome,
+        'reason': row.reason, 'attempts': row.attempts,
+        'last_attempt_at': row.last_attempt_at.isoformat() + 'Z'} for row in rows]
+
+
+@router.post('/cases/{case_id}/email/attend')
+def attend_email_messages(case_id: int, data: s.MailAttendInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
+    require(db, user, 'attention')
+    case = get_case(db, user, case_id, lock=True)
+    _require_case_editor(db, user, case)
+    ids = list(dict.fromkeys(data.message_ids))
+    messages = db.scalars(select(MailMessage).where(
+        MailMessage.id.in_(ids), MailMessage.case_id == case.id,
+        MailMessage.direction == 'Entrante', MailMessage.status == 'Vinculado',
+    ).with_for_update()).all()
+    if len(messages) != len(ids):
+        raise HTTPException(409, 'Uno o más correos ya no pertenecen a esta solicitud o no están vinculados')
+    attended_at = now()
+    newly_attended = []
+    for message in messages:
+        if message.attended_at is None:
+            message.attended_at = attended_at
+            message.attended_by_id = user.id
+            newly_attended.append(message.id)
+    if not newly_attended:
+        return {'ok': True, 'attended_ids': ids, 'pending_message': case.pending_message, 'version': case.version}
+    has_unattended = db.scalar(select(MailMessage.id).where(
+        MailMessage.case_id == case.id, MailMessage.direction == 'Entrante',
+        MailMessage.status == 'Vinculado', MailMessage.attended_at.is_(None),
+    ).limit(1))
+    case.pending_message = bool(has_unattended)
+    case.version += 1
+    service.event(db, case, user, f'{len(messages)} correo(s) entrante(s) marcado(s) como atendido(s)', kind='Sistema', channel='Correo', data={
+        'action': 'email_attended', 'email_message_ids': newly_attended, 'attended_at': attended_at.isoformat() + 'Z',
+    })
+    if not case.pending_message:
+        service.complete_resolved_production(db, case, user, 'email_message_attended')
+    return {'ok': True, 'attended_ids': ids, 'pending_message': case.pending_message, 'version': case.version}
+
+
 @router.post('/mail/pending/{message_id}/classify')
 def classify_mail(message_id: int, data: s.MailClassifyInput, user=Depends(current_user), db=Depends(get_db, scope='function')):
     require(db, user, 'attention')
@@ -315,6 +417,7 @@ def classify_mail(message_id: int, data: s.MailClassifyInput, user=Depends(curre
     if data.action == 'ignore':
         message.status = 'Ignorado'
         message.actor_id = user.id
+        _resolve_sync_outcome(db, message, 'ignored', 'manually_ignored')
         return {'ok': True, 'case_id': None, 'status': message.status}
     if data.action == 'link':
         if not data.case_id:
@@ -365,6 +468,7 @@ def classify_mail(message_id: int, data: s.MailClassifyInput, user=Depends(curre
         raise HTTPException(422, 'Acción de clasificación no reconocida')
 
     _attach_incoming(message, case, user, db)
+    _resolve_sync_outcome(db, message, 'imported', 'manually_classified')
     return {'ok': True, 'case_id': case.id, 'case_number': f'CG-{case.id:06d}', 'status': message.status}
 
 

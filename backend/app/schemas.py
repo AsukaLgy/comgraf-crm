@@ -342,6 +342,14 @@ class MailRetryInput(Input):
     confirm_uncertain: bool = False
 
 
+class MailAttendInput(Input):
+    message_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class MailTestInput(Input):
+    send_key: str = Field(min_length=16, max_length=80, pattern=r'^[a-zA-Z0-9:_-]+$')
+
+
 # ---- Preferencias de bandeja ----
 class ViewInput(Input):
     name: str = Field(min_length=1, max_length=100)

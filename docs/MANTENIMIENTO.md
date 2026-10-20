@@ -21,7 +21,7 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 | Anulación comercial | `frontend/src/CasePage.jsx`, `DeliveryFinance.jsx`; `backend/app/services.py`, `repository.py` | Detener producción conservando entregas y movimientos; ajustar cargo final, resolver devoluciones o dejar revisión financiera pendiente. |
 | Ficha imprimible | `frontend/src/CasePrintSheet.jsx` | Salida de taller y especificaciones del expediente. |
 | Productos y conversión | `frontend/src/ProductForm.jsx` | Partidas, especificaciones, cotizaciones y ampliación del mismo caso a producción. |
-| Correo Yahoo | `frontend/src/Settings.jsx`, `Composer.jsx`; `backend/app/routers/mail.py`, `mail_transport.py`, `mail_service.py`, `mail_security.py`, `mail_worker.py` | Configuración cifrada, cliente IMAP/SMTP, asociación de hilos, bandeja de salida idempotente y trabajador coordinado por MySQL. |
+| Correo Yahoo | `frontend/src/Settings.jsx`, `MailInbox.jsx`, `Composer.jsx`; `backend/app/routers/mail.py`, `mail_transport.py`, `mail_service.py`, `mail_security.py`, `mail_worker.py`, `mail_recovery.py` | Configuración cifrada, asociación de hilos, salida SMTP, recepción IMAP, resultados persistentes por UID, atención explícita y recuperación acotada. |
 | Comunicación manual | `frontend/src/Composer.jsx` | Notas y WhatsApp manuales; las notas internas nunca pasan a la bandeja de salida del correo. |
 | Endpoints | `backend/app/routers/` | HTTP, permisos de entrada, dependencias de sesión y traducción a servicios. |
 | Respuesta del expediente | `backend/app/routers/common.py` | Proyección común posterior a una mutación; evita que un router importe otro. |
@@ -50,6 +50,10 @@ Esta guía indica dónde cambiar cada comportamiento y qué invariantes debe con
 - Las órdenes anuladas antes de la resolución comercial quedan para revisión por migración. No se les añade un ajuste ni se cambia el saldo automáticamente.
 - La autorización del servidor es obligatoria aunque la interfaz oculte una acción. Las reglas críticas no se duplican solo como validación React.
 - Al calcular saldos, no reinterpretar condiciones históricas de pago ni cambiar importes o vencimientos sin una acción auditada y una decisión comercial.
+- El trabajador de correo tiene tareas independientes `inbox`, `outbox` y `sent_copy`; cada una usa un `GET_LOCK` MySQL distinto. La salud del proceso (latido) no demuestra conectividad Yahoo. La recepción solo avanza después de guardar un resultado terminal o una fila recuperable/revisable en `mail_sync_outcomes`.
+- No borres ni reinicies `mail_sync_cursors` para corregir un correo ausente. Usa `python -m app.mail_recovery --start-uid N --end-uid M` para una vista previa de un rango de hasta 100 UID; revisa el estado, la fecha y el tamaño, y aplica solo UID elegidos con `--apply --uids ...`. La herramienta vuelve a validar UIDVALIDITY, toma el bloqueo de recepción y deduplica antes de importar.
+- El estado `Aceptado por Yahoo` es independiente de `sent_copy_status`. Reintentar una copia en Enviados nunca llama SMTP. Un envío con resultado incierto requiere revisión explícita y no se reenvía automáticamente.
+- Los correos entrantes vinculados mantienen `attended_at` hasta que el usuario atiende los IDs seleccionados en la solicitud. No derives su atención de una respuesta saliente posterior ni de su hora de aceptación.
 
 ## Cómo cambiar una operación
 

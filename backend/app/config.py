@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     mail_encryption_key_file: str = '../.runtime/mail-secrets/fernet.key'
     mail_sync_interval_seconds: int = 60
     mail_connect_timeout_seconds: int = 10
+    mail_outbox_poll_seconds: int = 2
+    mail_copy_poll_seconds: int = 3
+    mail_worker_stale_seconds: int = 300
 
     @property
     def database_url(self):

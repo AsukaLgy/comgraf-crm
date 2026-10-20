@@ -269,7 +269,16 @@ def add_event(db, user, case_id, data):
                 case.status = 'Abierto'
                 event(db, case, user, 'Atención abierta automáticamente por una interacción entrante', data={'action': 'attention_status', 'from': old, 'to': 'Abierto', 'origin': 'automatic'})
         if data.direction == 'Saliente':
-            case.pending_message = False
+            # A manual reply can resolve a manual inbound interaction, but it
+            # cannot silently mark an imported email as handled.
+            from .models import MailMessage
+            from sqlalchemy import select
+            unhandled_email = db.scalar(select(MailMessage.id).where(
+                MailMessage.case_id == case.id, MailMessage.direction == 'Entrante',
+                MailMessage.status == 'Vinculado', MailMessage.attended_at.is_(None),
+            ).limit(1))
+            if not unhandled_email:
+                case.pending_message = False
         if data.direction == 'Saliente' and case.first_response_at is None:
             case.first_response_at = now()
         if data.direction == 'Saliente':

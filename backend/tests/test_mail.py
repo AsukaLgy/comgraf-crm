@@ -7,8 +7,8 @@ from sqlalchemy import func, select, text
 
 from app.db import SessionLocal, engine
 from app.mail_security import decrypt_password
-from app.mail_service import MailFailure, _case_number_target, parse_raw_message, process_outbox_message, sync_account
-from app.models import Case, Client, Event, MailAccount, MailMessage, MailSyncCursor
+from app.mail_service import MailFailure, _case_number_target, parse_raw_message, process_outbox_message, process_sent_copy, sync_account
+from app.models import Case, Client, Event, MailAccount, MailMessage, MailSyncCursor, MailSyncOutcome, now
 from app.routers import mail as mail_router
 from app import mail_service
 from app import mail_transport
@@ -78,6 +78,75 @@ def test_admin_config_is_encrypted_and_protocol_failures_are_separate(clients, m
         assert account.encrypted_password == encrypted
 
 
+def test_smtp_authentication_check_reports_phase_without_name_error(monkeypatch):
+    import smtplib
+    class FakeSMTP:
+        closed = False
+        def __init__(self, *args, **kwargs): pass
+        def login(self, *_): raise smtplib.SMTPAuthenticationError(535, b'credentials rejected')
+        def close(self): self.closed = True
+    fake = FakeSMTP()
+    monkeypatch.setattr(mail_transport.smtplib, 'SMTP_SSL', lambda *args, **kwargs: fake)
+    result = mail_transport.check_smtp('company@yahoo.test', 'secret-not-logged')
+    assert result['ok'] is False
+    assert result['status'] == 'authentication_error'
+    assert result['operation'] == 'login'
+    assert fake.closed is True
+
+
+def test_imap_activation_checkpoint_uses_uidnext_metadata_not_full_mailbox_search(monkeypatch):
+    class FakeIMAP:
+        searched = False
+        def login(self, *_): return 'OK', []
+        def select(self, *_args, **_kwargs): return 'OK', [b'10000']
+        def response(self, name):
+            return ('UIDVALIDITY', [b'1274214043']) if name == 'UIDVALIDITY' else ('UIDNEXT', [b'424915'])
+        def uid(self, *_args):
+            self.searched = True
+            raise AssertionError('El checkpoint no debe buscar ni transferir todos los UID')
+        def logout(self): return 'BYE', []
+    fake = FakeIMAP()
+    monkeypatch.setattr(mail_transport, 'open_imap', lambda: fake)
+    checkpoint = mail_transport._imap_checkpoint('company@yahoo.test', 'test-secret')
+    assert checkpoint['uidvalidity'] == '1274214043'
+    assert checkpoint['last_uid'] == 424914
+    assert checkpoint['checked_at'] is not None
+    assert fake.searched is False
+
+
+def test_transient_smtp_failure_retries_using_saved_credentials(clients, monkeypatch):
+    from app import mail_worker
+    api = clients['admin']
+    monkeypatch.setattr(mail_router, 'check_credentials', lambda *_: successful_connections())
+    assert api.put('/api/mail/config', json={'email': 'retry@yahoo.test', 'application_password': 'saved-app-password'}).json()['saved']
+    client = api.post('/api/clients', json={'name': 'Reintento'}).json()
+    case = api.post('/api/cases', json={'client_id': client['id'], 'subject': 'SMTP temporal'}).json()
+    queued = api.post(f"/api/cases/{case['id']}/email/send", json={
+        'to': ['retry@example.test'], 'subject': 'Prueba', 'body': 'Contenido.', 'attachment_ids': [],
+        'thread_root': None, 'send_key': 'smtp-temporary-retry-key',
+    }).json()
+    calls = []
+    def fail_once(*_):
+        calls.append(True)
+        if len(calls) == 1:
+            raise MailFailure('timeout_error', operation='connect')
+    monkeypatch.setattr(mail_service, 'smtp_send', fail_once)
+    process_outbox_message(SessionLocal, queued['id'])
+    with SessionLocal.begin() as db:
+        row = db.get(MailMessage, queued['id'])
+        assert row.status == 'Pendiente' and row.error_code == 'timeout_error'
+        assert row.send_attempts == 1 and row.send_next_attempt_at is not None
+        row.send_next_attempt_at = now() - timedelta(seconds=1)
+        account = db.get(MailAccount, row.account_id)
+        saved_encrypted = account.encrypted_password
+    mail_worker._outbox_once(row.account_id)
+    with SessionLocal() as db:
+        row = db.get(MailMessage, queued['id'])
+        assert row.status == 'Aceptado por Yahoo' and row.send_attempts == 2
+        assert db.get(MailAccount, row.account_id).encrypted_password == saved_encrypted
+    assert len(calls) == 2
+
+
 def test_real_outbox_persists_idempotently_without_sending_in_request(clients, monkeypatch):
     api = clients['admin']
     monkeypatch.setattr(mail_router, 'check_credentials', lambda *_: successful_connections())
@@ -110,20 +179,25 @@ def test_real_outbox_persists_idempotently_without_sending_in_request(clients, m
         assert not account.active and account.encrypted_password is None
 
 
-def test_configuration_test_sends_a_message_and_reports_sent_copy(clients, monkeypatch):
+def test_configuration_test_is_idempotently_queued_without_network_in_request(clients, monkeypatch):
     api = clients['admin']
     monkeypatch.setattr(mail_router, 'check_credentials', lambda *_: successful_connections())
     configured = api.put('/api/mail/config', json={'email': 'comgraf@yahoo.test', 'application_password': 'test-app-password'})
     assert configured.status_code == 200 and configured.json()['saved']
-    sent = []
-    monkeypatch.setattr(mail_transport, 'smtp_send', lambda address, password, recipients, payload: sent.append((address, recipients, payload)) or True)
-    monkeypatch.setattr(mail_router, 'append_sent_copy', lambda address, password, message_id, payload: 'Guardada')
-    result = api.post('/api/mail/test', json={})
-    assert result.status_code == 200 and result.json()['sent'] is True
-    assert result.json()['sent_copy_status'] == 'Guardada'
-    assert len(sent) == 1 and sent[0][0] == 'comgraf@yahoo.test'
-    assert sent[0][1] == ['comgraf@yahoo.test']
-    assert b'pudo enviar correo mediante Yahoo SMTP' in sent[0][2]
+    def no_network(*_):
+        raise AssertionError('El endpoint no debe llamar SMTP o IMAP en la petición web')
+    monkeypatch.setattr(mail_transport, 'smtp_send', no_network)
+    monkeypatch.setattr(mail_router, 'append_sent_copy', no_network)
+    payload = {'send_key': 'test-idempotency-key-0001'}
+    result = api.post('/api/mail/test', json=payload)
+    assert result.status_code == 202 and result.json()['queued'] is True
+    repeated = api.post('/api/mail/test', json=payload)
+    assert repeated.status_code == 202 and repeated.json()['id'] == result.json()['id']
+    with SessionLocal() as db:
+        row = db.get(MailMessage, result.json()['id'])
+        assert row.status == 'Pendiente' and row.to_addresses == ['comgraf@yahoo.test']
+        assert row.send_key.startswith('test:')
+    assert api.get(f"/api/mail/test/{result.json()['id']}").json()['status'] == 'Pendiente'
 
 
 def test_switching_accounts_keeps_separate_progress_and_pauses_old_outbox(clients, monkeypatch):
@@ -177,17 +251,22 @@ def test_outbox_acceptance_and_uncertain_result_are_not_retried_automatically(cl
             stored = db.get(MailMessage, accepted['id'])
             assert stored.status == 'Aceptado por Yahoo'
             assert stored.smtp_accepted_at is not None
-            assert stored.sent_copy_status == 'Pendiente'
+            assert stored.sent_copy_status in {'Pendiente', 'Enviando'}
         return 'Guardada'
     monkeypatch.setattr(mail_service, 'append_sent_copy', append_after_acceptance)
     process_outbox_message(SessionLocal, accepted['id'])
     with SessionLocal() as db:
         stored = db.get(MailMessage, accepted['id'])
         assert stored.status == 'Aceptado por Yahoo'
-        assert stored.sent_copy_status == 'Guardada'
+        assert stored.sent_copy_status == 'Pendiente'
         assert db.query(Event).filter(Event.case_id == case['id'], Event.kind == 'Correo saliente').count() == 1
         assert stored.thread_root == stored.message_id
     assert len(calls) == 1
+
+    monkeypatch.setattr(mail_service, 'append_sent_copy', lambda *_: 'Guardada')
+    process_sent_copy(SessionLocal, accepted['id'])
+    with SessionLocal() as db:
+        assert db.get(MailMessage, accepted['id']).sent_copy_status == 'Guardada'
 
     with SessionLocal.begin() as db:
         stored = db.get(MailMessage, accepted['id'])
@@ -195,7 +274,9 @@ def test_outbox_acceptance_and_uncertain_result_are_not_retried_automatically(cl
     copy_calls = []
     monkeypatch.setattr(mail_service, 'append_sent_copy', lambda *_: copy_calls.append(True) or 'Guardada')
     copy_retry = api.post(f"/api/mail/outbox/{accepted['id']}/retry-copy", json={})
-    assert copy_retry.status_code == 200 and copy_retry.json()['sent_copy_status'] == 'Guardada'
+    assert copy_retry.status_code == 200 and copy_retry.json()['sent_copy_status'] == 'Pendiente'
+    assert len(copy_calls) == 0 and len(calls) == 1
+    process_sent_copy(SessionLocal, accepted['id'])
     assert len(copy_calls) == 1 and len(calls) == 1
     with SessionLocal() as db:
         assert db.get(MailMessage, accepted['id']).sent_copy_status == 'Guardada'
@@ -319,6 +400,10 @@ def test_sync_uses_uid_checkpoint_deduplicates_and_reopens_valid_thread(clients,
     with SessionLocal() as db:
         large = db.scalar(select(MailMessage).where(MailMessage.message_id == '<large@example.test>'))
         assert large.status == 'Error de análisis' and 'supera el límite' in large.body_text
+        missing = db.scalar(select(MailSyncOutcome).where(MailSyncOutcome.account_id == account_id, MailSyncOutcome.uidvalidity == '777', MailSyncOutcome.uid == 54))
+        cursor = db.scalar(select(MailSyncCursor).where(MailSyncCursor.account_id == account_id, MailSyncCursor.folder == 'INBOX'))
+        assert missing.outcome == 'review' and missing.reason == 'internaldate_unavailable'
+        assert cursor.last_uid == 54
     # A new UIDVALIDITY causes a rescan; Message-ID/content hashes prevent duplicate cases or events.
     FakeIMAP.validity = '778'
     assert sync_account(SessionLocal, account_id) is True
@@ -327,6 +412,136 @@ def test_sync_uses_uid_checkpoint_deduplicates_and_reopens_valid_thread(clients,
         assert db.scalar(select(func.count(Case.id)).where(Case.client_id == client_id)) == 1
         assert db.scalar(select(func.count(MailMessage.id)).where(MailMessage.message_id == '<in-2@example.test>')) == 1
         assert db.scalar(select(func.count(MailMessage.id)).where(MailMessage.message_id == '<missing-date@example.test>')) == 0
+
+
+def test_sync_persists_missing_fetch_and_processing_failures_then_recovers(clients, monkeypatch):
+    api = clients['admin']
+    monkeypatch.setattr(mail_router, 'check_credentials', lambda *_: successful_connections('901', 50))
+    assert api.put('/api/mail/config', json={'email': 'recover@yahoo.test', 'application_password': 'test-app-password'}).json()['saved']
+    with SessionLocal() as db:
+        account_id = db.scalar(select(MailAccount.id).where(MailAccount.active.is_(True)))
+    first = raw_email('Cliente <recover@example.test>', 'recover@yahoo.test', '<recover-1@example.test>', 'Uno', 'Primero')
+    second = raw_email('Cliente <recover@example.test>', 'recover@yahoo.test', '<recover-2@example.test>', 'Dos', 'Segundo')
+
+    class FakeIMAP:
+        missing_bodies = {51}
+        messages = {51: first, 52: second}
+        def __init__(self, *args, **kwargs): pass
+        def login(self, *_): return 'OK', []
+        def select(self, *_args, **_kwargs): return 'OK', [b'2']
+        def response(self, _): return 'UIDVALIDITY', [b'901']
+        def uid(self, command, *args):
+            if command == 'search':
+                start = int(args[-1].split(':')[0])
+                return 'OK', [' '.join(str(uid) for uid in self.messages if uid >= start).encode()]
+            if command == 'fetch':
+                uid = int(args[0])
+                if 'RFC822.SIZE' in args[1]:
+                    stamp = (datetime.now(timezone.utc) + timedelta(days=1)).strftime('%d-%b-%Y %H:%M:%S %z')
+                    return 'OK', [f'1 (UID {uid} RFC822.SIZE {len(self.messages[uid])} INTERNALDATE "{stamp}")'.encode()]
+                if uid in self.missing_bodies:
+                    return 'OK', [b')']
+                return 'OK', [(b'1 (BODY[] {100})', self.messages[uid]), b')']
+            raise AssertionError(command)
+        def logout(self): return 'BYE', []
+
+    monkeypatch.setattr(mail_service, 'open_imap', lambda: FakeIMAP())
+    original_store = mail_service._store_incoming
+    fail_once = {52}
+    def fail_processing_once(*args, **kwargs):
+        uid = args[4]
+        if uid in fail_once:
+            fail_once.remove(uid)
+            raise ValueError('test_processing_failure')
+        return original_store(*args, **kwargs)
+    monkeypatch.setattr(mail_service, '_store_incoming', fail_processing_once)
+    assert sync_account(SessionLocal, account_id) is True
+    with SessionLocal() as db:
+        outcomes = db.scalars(select(MailSyncOutcome).where(MailSyncOutcome.account_id == account_id).order_by(MailSyncOutcome.uid)).all()
+        cursor = db.scalar(select(MailSyncCursor).where(MailSyncCursor.account_id == account_id, MailSyncCursor.folder == 'INBOX'))
+        assert [(row.uid, row.outcome) for row in outcomes] == [(51, 'retry'), (52, 'retry')]
+        assert cursor.last_uid == 52
+
+    FakeIMAP.missing_bodies.clear()
+    assert sync_account(SessionLocal, account_id) is True
+    with SessionLocal() as db:
+        outcomes = db.scalars(select(MailSyncOutcome).where(MailSyncOutcome.account_id == account_id).order_by(MailSyncOutcome.uid)).all()
+        stored = db.scalars(select(MailMessage).where(MailMessage.account_id == account_id, MailMessage.direction == 'Entrante')).all()
+        assert [row.outcome for row in outcomes] == ['imported', 'imported']
+        assert {row.uid for row in stored} == {51, 52}
+
+
+def test_mail_tasks_run_independently_and_incoming_email_requires_explicit_attention(clients, monkeypatch):
+    import threading
+    from app import mail_worker
+
+    api = clients['admin']
+    monkeypatch.setattr(mail_router, 'check_credentials', lambda *_: successful_connections())
+    assert api.put('/api/mail/config', json={'email': 'independent@yahoo.test', 'application_password': 'test-app-password'}).json()['saved']
+    client = api.post('/api/clients', json={'name': 'Cliente de prueba'}).json()
+    case = api.post('/api/cases', json={'client_id': client['id'], 'subject': 'Atención pendiente'}).json()
+    with SessionLocal.begin() as db:
+        account = db.scalar(select(MailAccount).where(MailAccount.active.is_(True)))
+        account_id = account.id
+        case_row = db.get(Case, case['id'])
+        case_row.pending_message = True
+        incoming = MailMessage(account_id=account_id, case_id=case_row.id, folder='INBOX', uidvalidity='100', uid=55,
+            direction='Entrante', status='Vinculado', sender='cliente@example.test', subject='Respuesta recibida',
+            body_text='Mensaje de prueba', attachment_ids=[], to_addresses=[], cc_addresses=[])
+        db.add(incoming)
+        db.flush()
+        incoming_id = incoming.id
+    queued = api.post(f"/api/cases/{case['id']}/email/send", json={
+        'to': ['cliente@example.test'], 'subject': 'Respuesta', 'body': 'Te respondemos.',
+        'attachment_ids': [], 'thread_root': None, 'send_key': 'independent-send-key-0001',
+    }).json()
+
+    imap_started, release_imap = threading.Event(), threading.Event()
+    def slow_imap(_SessionLocal, _account_id):
+        imap_started.set()
+        release_imap.wait(timeout=5)
+        return True
+    monkeypatch.setattr(mail_worker, 'sync_account', slow_imap)
+    monkeypatch.setattr(mail_service, 'smtp_send', lambda *_: True)
+    receive = threading.Thread(target=mail_worker._inbox_once, args=(account_id,))
+    receive.start()
+    assert imap_started.wait(timeout=2)
+    try:
+        mail_worker._outbox_once(account_id)
+        with SessionLocal() as db:
+            outgoing = db.get(MailMessage, queued['id'])
+            case_row = db.get(Case, case['id'])
+            assert outgoing.status == 'Aceptado por Yahoo'
+            assert outgoing.sent_copy_status == 'Pendiente'
+            assert case_row.pending_message is True
+        copy_started, release_copy = threading.Event(), threading.Event()
+        def slow_copy(*_):
+            copy_started.set()
+            release_copy.wait(timeout=5)
+            return 'Guardada'
+        monkeypatch.setattr(mail_service, 'append_sent_copy', slow_copy)
+        copy_thread = threading.Thread(target=mail_worker._copy_once, args=(account_id,))
+        copy_thread.start()
+        assert copy_started.wait(timeout=2)
+        second = api.post(f"/api/cases/{case['id']}/email/send", json={
+            'to': ['cliente@example.test'], 'subject': 'Segunda respuesta', 'body': 'Otro mensaje.',
+            'attachment_ids': [], 'thread_root': None, 'send_key': 'independent-send-key-0002',
+        }).json()
+        mail_worker._outbox_once(account_id)
+        with SessionLocal() as db:
+            assert db.get(MailMessage, second['id']).status == 'Aceptado por Yahoo'
+    finally:
+        release_imap.set()
+        receive.join(timeout=5)
+        if 'release_copy' in locals():
+            release_copy.set()
+        if 'copy_thread' in locals():
+            copy_thread.join(timeout=5)
+    attended = api.post(f"/api/cases/{case['id']}/email/attend", json={'message_ids': [incoming_id]})
+    assert attended.status_code == 200 and attended.json()['pending_message'] is False
+    with SessionLocal() as db:
+        incoming = db.get(MailMessage, incoming_id)
+        assert incoming.attended_at is not None and incoming.attended_by_id == clients['admin'].get('/api/auth/me').json()['id']
 
 
 def test_html_is_rendered_as_safe_plain_text_and_auto_mail_is_detectable():
@@ -341,6 +556,23 @@ def test_html_is_rendered_as_safe_plain_text_and_auto_mail_is_detectable():
     assert 'robar' not in parsed['body']
     assert 'tracking.invalid' not in parsed['body']
     assert '<script>' not in parsed['body']
+
+
+def test_inbox_worker_reports_persistence_failure_without_marking_imap_disconnected(clients, monkeypatch):
+    from app import mail_worker
+    api = clients['admin']
+    monkeypatch.setattr(mail_router, 'check_credentials', lambda *_: successful_connections())
+    assert api.put('/api/mail/config', json={'email': 'health@yahoo.test', 'application_password': 'test-app-password'}).json()['saved']
+    with SessionLocal.begin() as db:
+        account = db.scalar(select(MailAccount).where(MailAccount.active.is_(True)))
+        account.imap_status = 'connected'
+        account.last_error = 'persistence_error'
+        account_id = account.id
+    monkeypatch.setattr(mail_worker, 'sync_account', lambda *_: False)
+    assert mail_worker._inbox_once(account_id) == (False, 'persistence_error')
+    with SessionLocal() as db:
+        account = db.get(MailAccount, account_id)
+        assert account.imap_status == 'connected'
 
 
 def test_mysql_advisory_lock_prevents_two_sync_workers(clients):

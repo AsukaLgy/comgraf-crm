@@ -5,10 +5,8 @@ import smtplib
 import socket
 import ssl
 import time
+import logging
 from datetime import datetime, timezone
-from email import policy
-from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
 
 from .config import settings
 
@@ -19,6 +17,7 @@ SMTP_PORT = 465
 SENDER_NAME = 'Comgraf | Comunicación Gráfica'
 ALLOWED_MIME = {'application/pdf', 'image/png', 'image/jpeg', 'text/plain'}
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class MailFailure(Exception):
@@ -60,11 +59,18 @@ def _imap_checkpoint(email_address, password):
         operation = 'uidvalidity'
         validity = _uidvalidity(connection)
         operation = 'inbox_checkpoint'
-        result, data = connection.uid('search', None, 'ALL')
-        if result != 'OK':
-            raise MailFailure('inbox_query_error', operation=operation)
-        uids = [int(value) for value in (data[0] or b'').split() if value.isdigit()]
-        return {'uidvalidity': validity, 'last_uid': max(uids, default=0)}
+        status, data = connection.response('UIDNEXT')
+        values = data or []
+        try:
+            next_uid = int(values[0].decode() if isinstance(values[0], bytes) else values[0])
+        except (IndexError, TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise MailFailure('inbox_metadata_error', operation=operation, cause=exc) from exc
+        if (status or '').upper() != 'UIDNEXT' or next_uid < 1:
+            raise MailFailure('inbox_metadata_error', operation=operation)
+        # UIDNEXT is the next identifier Yahoo will assign, so its predecessor
+        # is a cheap activation checkpoint even for a large mailbox.
+        checked_at = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+        return {'uidvalidity': validity, 'last_uid': next_uid - 1, 'checked_at': checked_at}
     except MailFailure:
         raise
     except (imaplib.IMAP4.error, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
@@ -88,23 +94,26 @@ def check_imap(email_address, password):
 
 def check_smtp(email_address, password):
     connection = None
+    phase = 'connect'
     try:
         connection = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=settings.mail_connect_timeout_seconds, context=ssl.create_default_context())
+        phase = 'login'
         try:
             connection.login(email_address, password)
         except smtplib.SMTPAuthenticationError as exc:
             raise MailFailure('authentication_error', operation=phase, cause=exc) from exc
         return {'ok': True, 'status': 'connected'}
     except MailFailure as exc:
-        return {'ok': False, 'status': exc.code}
+        return {'ok': False, 'status': exc.code, 'operation': exc.operation, 'cause_type': exc.cause_type}
     except (smtplib.SMTPException, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
         if isinstance(exc, smtplib.SMTPAuthenticationError):
-            return {'ok': False, 'status': 'authentication_error'}
-        return {'ok': False, 'status': _network_error_code(exc)}
+            return {'ok': False, 'status': 'authentication_error', 'operation': phase, 'cause_type': type(exc).__name__}
+        return {'ok': False, 'status': _network_error_code(exc), 'operation': phase, 'cause_type': type(exc).__name__}
     finally:
         if connection is not None:
             try:
-                connection.quit()
+                # QUIT waits for another server round trip after the credential check.
+                connection.close()
             except Exception:
                 pass
 
@@ -127,6 +136,12 @@ def status_label(code):
         'inbox_metadata_error': 'Error al leer metadatos de INBOX',
         'message_fetch_error': 'Error al descargar mensaje',
         'message_processing_error': 'Error al procesar mensaje',
+        'internaldate_unavailable': 'Mensaje pendiente: fecha IMAP no interpretable',
+        'message_content_missing': 'Mensaje pendiente de volver a descargar',
+        'message_metadata_missing': 'Metadatos del mensaje pendientes',
+        'message_size_unavailable': 'Tamaño del mensaje pendiente de consultar',
+        'sent_copy_error': 'Error al guardar copia en Enviados',
+        'worker_internal_error': 'Error interno del trabajador',
         'persistence_error': 'Error al guardar correo',
         'worker_stale': 'Sin actividad reciente del sincronizador',
         'starting': 'Esperando primera consulta',
@@ -155,20 +170,6 @@ def _imap_failure(exc, operation):
     return MailFailure(code, operation=operation, cause=exc)
 
 
-def send_test_mail(email_address, password):
-    message = EmailMessage(policy=policy.SMTP)
-    message['From'] = formataddr((SENDER_NAME, email_address))
-    message['To'] = email_address
-    message['Reply-To'] = email_address
-    message['Subject'] = 'Prueba de conexión · Comgraf'
-    message['Date'] = datetime.now(timezone.utc)
-    message['Message-ID'] = make_msgid(domain=email_address.rsplit('@', 1)[-1])
-    message.set_content('Este mensaje confirma que Comgraf pudo enviar correo mediante Yahoo SMTP.\n\nLa aceptación SMTP no confirma entrega ni lectura.')
-    payload = message.as_bytes(policy=policy.SMTP)
-    smtp_send(email_address, password, [email_address], payload)
-    return payload
-
-
 def smtp_send(email_address, password, recipients, payload):
     connection = None
     phase = 'connect'
@@ -178,7 +179,7 @@ def smtp_send(email_address, password, recipients, payload):
         try:
             connection.login(email_address, password)
         except smtplib.SMTPAuthenticationError as exc:
-            raise MailFailure('authentication_error') from exc
+            raise MailFailure('authentication_error', operation=phase, cause=exc) from exc
         phase = 'mail'
         code, _ = connection.mail(email_address)
         if code < 200 or code >= 300:
@@ -206,7 +207,9 @@ def smtp_send(email_address, password, recipients, payload):
     finally:
         if connection is not None:
             try:
-                connection.quit()
+                # DATA's 2xx reply is Yahoo's acceptance signal. Do not wait for QUIT
+                # before the caller can persist that result.
+                connection.close()
             except Exception:
                 pass
 
@@ -249,7 +252,8 @@ def append_sent_copy(email_address, password, message_id, payload):
             return 'Guardada'
         result, _ = connection.append(folder, '\\Seen', imaplib.Time2Internaldate(time.time()), payload)
         return 'Guardada' if result == 'OK' else 'Error'
-    except Exception:
+    except Exception as exc:
+        logger.warning('Copia de Enviados fallida operation=append cause=%s', type(exc).__name__)
         return 'Error'
     finally:
         if connection is not None:
